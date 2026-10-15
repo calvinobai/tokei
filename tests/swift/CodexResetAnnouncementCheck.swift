@@ -29,6 +29,11 @@ private final class MockFeed: URLProtocol {
 @main
 struct CodexResetAnnouncementCheck {
     static func main() throws {
+        let defaults = UserDefaults(suiteName: "reset-test-" + UUID().uuidString)!
+        try expect(CodexResetMonitor.isEnabled(in: defaults), "new installs default on")
+        defaults.set(false, forKey: CodexResetMonitor.enabledKey)
+        try expect(!CodexResetMonitor.isEnabled(in: defaults), "explicit off is preserved")
+        defaults.removeObject(forKey: CodexResetMonitor.enabledKey)
         let stamp = "2026-10-15T14:00:00.000+08:00"
         let now = ISO8601DateFormatter().date(from: "2026-10-15T06:00:00Z")!
         var event: [String: Any] = [
@@ -127,15 +132,21 @@ struct CodexResetAnnouncementCheck {
         monitor.refresh(enabled: true, now: now.addingTimeInterval(600))
         try wait(monitor)
         try expect(monitor.lastFetchFailed && monitor.snapshot != nil, "offline keeps last good snapshot")
+        try expect(monitor.lastFailure == .network(URLError.notConnectedToInternet.rawValue), "network failure classified")
+        monitor.refresh(enabled: true, now: now.addingTimeInterval(659))
+        try expect(!monitor.isRefreshing, "failed requests are still throttled")
         MockFeed.failure = nil
         MockFeed.body = Data("<html>blocked</html>".utf8)
-        monitor.refresh(enabled: true, now: now.addingTimeInterval(1200))
+        monitor.refresh(enabled: true, now: now.addingTimeInterval(660))
         try wait(monitor)
         try expect(monitor.lastFetchFailed && monitor.snapshot != nil, "bad response cannot erase cache")
+        try expect(monitor.lastFailure == .invalidData, "parse failure classified")
         MockFeed.body = validData
-        monitor.refresh(enabled: true, now: now.addingTimeInterval(1800))
+        monitor.refresh(enabled: true, now: now.addingTimeInterval(779))
+        try expect(!monitor.isRefreshing, "second failure backs off two minutes")
+        monitor.refresh(enabled: true, now: now.addingTimeInterval(780))
         try wait(monitor)
-        try expect(!monitor.lastFetchFailed && monitor.snapshot != nil, "network recovery clears warning")
+        try expect(!monitor.lastFetchFailed && monitor.snapshot != nil, "failed refresh retries promptly after network recovery")
         monitor.refresh(enabled: true, now: now.addingTimeInterval(2400))
         monitor.refresh(enabled: false, now: now.addingTimeInterval(2400))
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))

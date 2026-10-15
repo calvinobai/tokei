@@ -48,8 +48,12 @@ struct CodexResetAnnouncementView: View {
                         .foregroundStyle(Theme.tTertiary)
                 }
                 if stale {
-                    Text(monitor.lastFetchFailed ? L("刷新失败，显示上次记录") : L("来源检查有延迟，等待更新"))
-                        .foregroundStyle(.orange)
+                    HStack {
+                        Text(monitor.lastFetchFailed ? L("刷新失败，显示上次记录") : L("来源检查有延迟，等待更新"))
+                            .foregroundStyle(.orange)
+                        Spacer(minLength: 4)
+                        retryButton
+                    }
                 }
                 HStack(alignment: .firstTextBaseline) {
                     Text(L("检查 %@", localTime(feed.monitor?.lastVerifiedAt ?? feed.checkedAt)))
@@ -65,18 +69,34 @@ struct CodexResetAnnouncementView: View {
                     Text(monitor.lastFetchFailed ? L("重置动态暂不可用") : L("正在读取重置公告…"))
                     Spacer(minLength: 4)
                     if monitor.lastFetchFailed {
-                        Button(L("重试")) { monitor.refresh(force: true) }
-                            .buttonStyle(.plain).foregroundStyle(Theme.codex)
-                            .disabled(monitor.isRefreshing)
+                        retryButton
                     }
                 }
                 .foregroundStyle(Theme.tSecondary)
+            }
+            if let failure = monitor.lastFailure {
+                Text(failureDescription(failure)).foregroundStyle(Theme.tTertiary)
             }
             Text(L("AIHOT 整理 · 非官方 · %@", Fmt.localTimeZoneCaption()))
                 .font(.system(size: Theme.fontSize(9))).foregroundStyle(Theme.tTertiary)
         }
         .font(.system(size: Theme.fontSize(10)))
         .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private var retryButton: some View {
+        Button(L("重试")) { monitor.refresh(force: true) }
+            .buttonStyle(.plain).foregroundStyle(Theme.codex)
+            .disabled(monitor.isRefreshing)
+    }
+
+    private func failureDescription(_ failure: CodexResetMonitor.Failure) -> String {
+        switch failure {
+        case .network(let code): return L("网络请求失败（%@），将自动重试", code)
+        case .http(let status): return L("来源返回 HTTP %@，将自动重试", status)
+        case .invalidResponse: return L("来源响应无效，将自动重试")
+        case .invalidData: return L("公告数据格式异常，将自动重试")
+        }
     }
 
     private func eventName(_ event: CodexResetFeed.Event) -> String {

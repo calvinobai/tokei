@@ -99,7 +99,7 @@ struct PanelView: View {
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
-    @AppStorage(CodexResetMonitor.enabledKey) private var codexResetAnnouncementsEnabled = false
+    @AppStorage(CodexResetMonitor.enabledKey) private var codexResetAnnouncementsEnabled = true
     @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
@@ -3434,7 +3434,7 @@ struct PanelView: View {
             thinDivider
 
             settingsToggleRow(L("Codex 额外重置动态"), isOn: $codexResetAnnouncementsEnabled)
-            Text(L("默认关闭。开启后每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。"))
+            Text(L("默认开启，可随时关闭。每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。"))
                 .font(.system(size: Theme.fontSize(8.5)))
                 .foregroundStyle(Theme.tTertiary)
                 .fixedSize(horizontal: false, vertical: true)

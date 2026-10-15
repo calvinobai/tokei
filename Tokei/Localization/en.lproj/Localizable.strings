@@ -619,4 +619,9 @@
 "来源已核实到账，具体日期未定" = "Receipt verified by the source; exact date unknown";
 
 "Codex 额外重置动态" = "Codex extra reset updates";
-"默认关闭。开启后每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。" = "Off by default. When enabled, fetch public reset announcements from AIHOT every 10 minutes, without sending credentials or usage. Times are estimates; unannounced resets are not predicted. Check Codex for your personal quota.";
+"默认开启，可随时关闭。每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。" = "On by default; can be disabled at any time. Fetch public reset announcements from AIHOT every 10 minutes, without sending credentials or usage. Times are estimates; unannounced resets are not predicted. Check Codex for your personal quota.";
+
+"网络请求失败（%@），将自动重试" = "Network request failed (%@); retrying automatically";
+"来源返回 HTTP %@，将自动重试" = "Source returned HTTP %@; retrying automatically";
+"来源响应无效，将自动重试" = "Invalid source response; retrying automatically";
+"公告数据格式异常，将自动重试" = "Invalid announcement data; retrying automatically";

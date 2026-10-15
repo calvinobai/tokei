@@ -8,6 +8,14 @@ final class CodexResetMonitor: ObservableObject {
     static let feedURL = URL(string: "https://aihot.news/api/site/codex-reset")!
     static let refreshInterval: TimeInterval = 10 * 60
 
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) as? Bool ?? true
+    }
+
+    enum Failure: Error, Equatable {
+        case network(Int), http(Int), invalidResponse, invalidData
+    }
+
     struct Snapshot: Codable {
         let feed: CodexResetFeed
         let fetchedAt: Date
@@ -16,6 +24,11 @@ final class CodexResetMonitor: ObservableObject {
     @Published private(set) var snapshot: Snapshot?
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastFetchFailed = false
+    @Published private(set) var lastFailure: Failure?
+    private var failureCount = 0
+    private var retryInterval: TimeInterval {
+        min(Self.refreshInterval, 60 * pow(2, Double(min(failureCount - 1, 4))))
+    }
     private var lastAttempt = Date.distantPast
     private var requestTask: URLSessionDataTask?
     private var requestID: UUID?
@@ -40,7 +53,7 @@ final class CodexResetMonitor: ObservableObject {
         }
     }
 
-    func refresh(enabled: Bool = UserDefaults.standard.bool(forKey: enabledKey),
+    func refresh(enabled: Bool = CodexResetMonitor.isEnabled(),
                  force: Bool = false, now: Date = Date()) {
         guard enabled else {
             if requestTask != nil { lastAttempt = .distantPast }
@@ -51,7 +64,7 @@ final class CodexResetMonitor: ObservableObject {
             return
         }
         // Manual retries are bounded too; regular collector ticks never cause extra traffic.
-        let interval: TimeInterval = force ? 30 : Self.refreshInterval
+        let interval: TimeInterval = force ? 30 : (lastFetchFailed ? retryInterval : Self.refreshInterval)
         guard !isRefreshing, now.timeIntervalSince(lastAttempt) >= interval else { return }
         lastAttempt = now
         isRefreshing = true
@@ -63,15 +76,17 @@ final class CodexResetMonitor: ObservableObject {
         request.setValue("Mozilla/5.0 (Macintosh) Tokei", forHTTPHeaderField: "User-Agent")
         requestTask = session.dataTask(with: request) { [weak self] data, response, error in
             let result: Result<CodexResetFeed, Error> = Result {
-                if let error { throw error }
-                guard let response = response as? HTTPURLResponse,
-                      response.statusCode == 200, response.url?.host == Self.feedURL.host,
+                if let error { throw Failure.network((error as NSError).code) }
+                guard let response = response as? HTTPURLResponse else { throw Failure.invalidResponse }
+                guard response.statusCode == 200 else { throw Failure.http(response.statusCode) }
+                guard response.url?.host == Self.feedURL.host,
                       response.url?.scheme == "https",
                       response.mimeType == "application/json",
                       let data, data.count <= 1_000_000 else {
-                    throw CodexResetFeed.FeedError.invalidResponse
+                    throw Failure.invalidResponse
                 }
-                return try CodexResetFeed.decode(data)
+                do { return try CodexResetFeed.decode(data) }
+                catch { throw Failure.invalidData }
             }
             DispatchQueue.main.async {
                 guard let self, self.requestID == id else { return }
@@ -83,13 +98,17 @@ final class CodexResetMonitor: ObservableObject {
                     let snapshot = Snapshot(feed: feed, fetchedAt: Date())
                     self.snapshot = snapshot
                     self.lastFetchFailed = false
+                    self.lastFailure = nil
+                    self.failureCount = 0
                     if let cacheURL = self.cacheURL, let data = try? JSONEncoder().encode(snapshot) {
                         try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(),
                                                                withIntermediateDirectories: true)
                         try? data.write(to: cacheURL, options: .atomic)
                     }
-                case .failure:
+                case .failure(let error):
                     self.lastFetchFailed = true
+                    self.lastFailure = error as? Failure ?? .invalidResponse
+                    self.failureCount += 1
                 }
             }
         }

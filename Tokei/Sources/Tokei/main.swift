@@ -71,7 +71,7 @@ final class Store: ObservableObject {
 
     func refresh(prewarmQuotaDetail: Bool = false) {
         CodexResetMonitor.shared.refresh(enabled:
-            UserDefaults.standard.bool(forKey: CodexResetMonitor.enabledKey) &&
+            CodexResetMonitor.isEnabled() &&
             UserDefaults.standard.object(forKey: "showCodex") as? Bool != false)
         quotaDetailPrewarmPending = quotaDetailPrewarmPending || prewarmQuotaDetail
         if refreshInFlight {
