@@ -5660,8 +5660,8 @@ def _grok_usage_cost(record, model):
     return cost
 
 
-# 1：记录附上推理耗时，升级后整份重读一次（文件只有几 MB）。
-_GROK_USAGE_VERSION = 1
+# 2：复用前核对文件身份和内容边界，兼容 Windows 原地改写时的时间戳精度。
+_GROK_USAGE_VERSION = 2
 
 
 def _load_grok_usage_records(cache):
@@ -5678,7 +5678,11 @@ def _load_grok_usage_records(cache):
     signature = f"{stat.st_mtime_ns}:{stat.st_size}"
     complete_offset = _codex_complete_offset(GROK_LOG, stat.st_size)
     file_id = f"{stat.st_dev}:{stat.st_ino}"
+    complete_guard = _codex_offset_guard(GROK_LOG, complete_offset)
     if (old.get("sig") == signature
+            and old.get("file_id") == file_id
+            and complete_guard is not None
+            and old.get("parsed_guard") == complete_guard
             and int(old.get("parsed_size", 0) or 0) == complete_offset):
         return list(old.get("records") or [])
 
@@ -5719,7 +5723,7 @@ def _load_grok_usage_records(cache):
         "sig": signature,
         "file_id": file_id,
         "parsed_size": complete_offset,
-        "parsed_guard": _codex_offset_guard(GROK_LOG, complete_offset),
+        "parsed_guard": complete_guard,
         "records": records,
     }
     if updated != old:
