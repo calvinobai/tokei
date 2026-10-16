@@ -17549,7 +17549,8 @@ def _recent_quota_detail_payload():
     try:
         with open(path, encoding="utf-8") as f:
             age = datetime.now().timestamp() - os.fstat(f.fileno()).st_mtime
-            if 0 <= age <= 60:
+            # Windows 的文件时间精度可能高于当前时钟读数，刚写完会暂时领先几毫秒。
+            if -1 <= age <= 60:
                 payload = json.load(f)
                 if isinstance(payload, dict) and all(
                         isinstance(payload.get(tool), dict) for tool, _ in _QUOTA_TOOLS):
