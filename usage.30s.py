@@ -1316,7 +1316,7 @@ def ledger_flush():
     每轮扫描只调一次,替代此前每工具一次的 15 轮锁+读+写(性能回归根因)。"""
     if not _LEDGER_CACHE["dirty"] or _LEDGER_CACHE["data"] is None:
         return
-    if not _LEDGER_CACHE.get("urgent"):
+    if not _LEDGER_CACHE.get("urgent") and _LEDGER_TODAY_FLUSH_INTERVAL > 0:
         try:
             if _time.time() - os.path.getmtime(_LEDGER_FILE) < _LEDGER_TODAY_FLUSH_INTERVAL:
                 return
