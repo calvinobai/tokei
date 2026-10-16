@@ -45,6 +45,7 @@ class UpdaterSecurityTests(unittest.TestCase):
             )
             self.assertIn("Updater security checks passed", run_result.stdout)
 
+    @unittest.skipUnless(sys.platform == "darwin", "DMG release tooling requires macOS")
     def test_release_metadata_includes_dmg_sha256(self):
         root = Path(__file__).resolve().parents[1]
         generator = root / "Tokei" / "generate_update_metadata.sh"

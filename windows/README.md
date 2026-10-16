@@ -43,6 +43,11 @@ pnpm check:i18n     # 界面文案检查（pnpm build 也会跑）
 Windows 安装包由 GitHub Actions 构建（`.github/workflows/windows.yml`）：下载 Python embeddable 包放到
 `src-tauri/python/`，装上 `zstandard`，再 `pnpm tauri build` 生成 NSIS 安装包（暂未签名）。
 
+CI 在 Windows、Linux 和 macOS 上运行全量 Python 回归；macOS 负责执行 Swift/AppKit 检查。
+Windows 安装包须等待三个平台的全量测试通过，并额外执行 Rust 原生窗口测试、内嵌 Python
+采集检查和前端构建体积检查。Unix 权限位只在支持的平台断言；Windows 仍执行配置链接拒绝、
+缓存隔离、DPAPI 解密和授权撤销等检查。
+
 ## 结构
 
 - `native_bridge.py`：Windows 凭据解密、Grok Bot 授权与官方查询、Claude CLI 查询缓存、应用活跃统计。随安装包放在 `collector/windows_native.py`，使用内嵌 Python 和 cryptography。

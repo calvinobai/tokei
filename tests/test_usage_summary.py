@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -9,6 +10,7 @@ TOKEI_SRC = ROOT / "Tokei" / "Sources" / "Tokei"
 
 
 class UsageSummaryBuilderTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_summary_builder_period_visibility_and_totals(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "usage-summary-check"

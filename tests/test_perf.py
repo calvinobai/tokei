@@ -1,4 +1,5 @@
 """输出速度与首字延迟：按请求计时，按「天 × 模型」汇总。"""
+import sys
 import json
 import tempfile
 import unittest
@@ -382,6 +383,7 @@ class LogAndDatabasePerfTests(unittest.TestCase):
 
 
 class PerfStatMergeSwiftTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_devices_merge_by_recomputing_the_averages(self):
         import subprocess
         root = Path(__file__).resolve().parents[1]

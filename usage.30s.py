@@ -6094,9 +6094,14 @@ def _read_qwenwork_mcp_config(path=None):
         flags |= os.O_NOFOLLOW
     fd = None
     try:
+        # Windows 没有 O_NOFOLLOW；打开前检查链接，打开后核对同一个文件。
+        before = os.lstat(config_path)
+        if not stat.S_ISREG(before.st_mode):
+            return None
         fd = os.open(config_path, flags)
         info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode)
+        if ((info.st_dev, info.st_ino) != (before.st_dev, before.st_ino)
+                or not stat.S_ISREG(info.st_mode)
                 or info.st_size <= 0
                 or info.st_size > _QWENWORK_MCP_MAX_CONFIG_BYTES):
             return None
