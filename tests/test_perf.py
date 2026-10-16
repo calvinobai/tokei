@@ -40,6 +40,18 @@ class PerfHelperTests(unittest.TestCase):
             self.assertTrue(low <= seconds < high or seconds == high, seconds)
             self.assertTrue(high - low <= max(0.05, high * 0.05 / 1.05) + 1e-9, seconds)
 
+    def test_ttft_median_uses_both_middle_samples_for_even_counts(self):
+        for values, expected in [([1, 9], 5), ([1, 1, 9, 9], 5),
+                                 ([1, 2, 9], 2), ([2, 2, 2, 2], 2)]:
+            with self.subTest(values=values):
+                perf = {}
+                for value in values:
+                    USAGE._perf_add(perf, "fixture", 100, 1, value)
+                summary = USAGE._perf_summary(perf)
+                self.assertAlmostEqual(summary["ttft"], expected, delta=expected * 0.03)
+                self.assertEqual(summary["tps"], 100, "TTFT aggregation must not change output throughput")
+        self.assertIsNone(USAGE._perf_ttft_median({}))
+
     def test_legacy_bucket_counts_never_exceed_the_request_count(self):
         legacy = {"m": {"o": 400, "g": 4.0, "n": 2, "t": {"9": 2}}}   # 旧的 2.0–2.5 秒粗桶
         self.assertTrue(2.2 <= USAGE._perf_summary(legacy)["ttft"] <= 2.4, "按粗桶中点 2.25 秒折进细分桶")
