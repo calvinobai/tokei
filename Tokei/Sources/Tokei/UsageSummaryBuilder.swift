@@ -347,7 +347,7 @@ enum UsageSummaryBuilder {
         }
         if visibility.copilot {
             appendTokenTool(&lines, id: "copilot", name: "GitHub Copilot",
-                            range: usage.copilot.ranges.get(range))
+                            range: usage.copilot.ranges.get(range), includesCredits: true)
         }
         if visibility.devin {
             appendTokenTool(&lines, id: "devin", name: "Devin",

@@ -358,6 +358,10 @@ private func nativeToolCard(
                 MetricCell(icon: "dollarsign.circle", label: L("≈成本"),
                            value: nativeMoney(cost, line.cost_cny), tint: tint)
             }
+            if let extra = line.extra, !extra.isEmpty {
+                MetricCell(icon: "circle.hexagongrid.fill", label: "Credits",
+                           value: extra.replacingOccurrences(of: " Credits", with: ""), tint: tint)
+            }
             if let hit = line.hit, hit > 0 {
                 RingMetricCell(value: hit, label: "Cache Hit", tint: tint)
             }

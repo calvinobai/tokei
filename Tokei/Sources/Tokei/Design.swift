@@ -23,8 +23,20 @@ struct Tip: NSViewRepresentable {
     func updateNSView(_ v: NSView, context: Context) { v.toolTip = text }
 }
 
+/// `ImageRenderer` 离屏截图时 NSView 工具提示 overlay 会渲染成破损图标，需跳过。
+enum OffscreenRender {
+    static var suppressTips = false
+}
+
 extension View {
-    func tip(_ text: String) -> some View { overlay(Tip(text: text)) }
+    @ViewBuilder
+    func tip(_ text: String) -> some View {
+        if OffscreenRender.suppressTips {
+            self
+        } else {
+            overlay(Tip(text: text))
+        }
+    }
 }
 
 // 设计系统:颜色 / 间距 / 圆角集中定义,组件语义化复用。
