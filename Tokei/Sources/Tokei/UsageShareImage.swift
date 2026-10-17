@@ -143,6 +143,7 @@ enum UsageShareImage {
         case "Kimi Code": return Theme.kimicode
         case "Muse Code": return Theme.musecode
         case "Command Code": return Theme.cmdcode
+        case "GitHub Copilot": return Theme.copilot
         case "Prime Agent": return Theme.primeAgent
         case "DeepSeek Harness": return Theme.deepseekHarness
         case "Devin": return Theme.devin
