@@ -74,7 +74,7 @@ enum Theme {
     static let kimicode = Color(red: 0.20, green: 0.78, blue: 0.66) // 月石青
     static let musecode = Color(red: 0.10, green: 0.42, blue: 0.92) // Meta 蓝
     static let cmdcode = Color(red: 0.22, green: 0.68, blue: 0.32) // 终端绿
-    static let copilot = Color(red: 0.24, green: 0.52, blue: 0.96) // GitHub Copilot 蓝
+    static let copilot = Color(red: 0.54, green: 0.34, blue: 0.90) // GitHub Copilot 紫（#8957E5 系）
     static let devin = Color(red: 0.42, green: 0.47, blue: 0.98)    // 深蓝紫
     static let minimax = Color(red: 0.91, green: 0.25, blue: 0.40)  // MiniMax 玫红
 
