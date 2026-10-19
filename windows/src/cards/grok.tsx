@@ -458,10 +458,16 @@ function GrokBotCard({ ctx }: { ctx: CardContext }) {
 
 export const grokBotCard: CardSpec = {
   id: "grok-bot",
-  // 只有当前页签真有本地活动时才能复制（Mac：hasActivity && displayedRange == sel）。
+  // 本地活动或账号用量存在时即可复制分享图。
   copyable: ({ usage, range }) => {
     const d = grokBotDisplay(usage, range);
-    return d.key === range && (d.range.sessions > 0 || d.range.calls > 0 || d.range.turns > 0);
+    return (
+      d.range.sessions > 0 ||
+      d.range.calls > 0 ||
+      d.range.turns > 0 ||
+      totalTokens(d.usage) > 0 ||
+      (d.usage.requests ?? 0) > 0
+    );
   },
   name: "Grok Bot",
   visibleKey: "showGrokBot",

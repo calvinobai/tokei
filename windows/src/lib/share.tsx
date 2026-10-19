@@ -29,6 +29,8 @@ const VISIBILITY_KEYS = {
   claude: "showClaude",
   codex: "showCodex",
   gemini: "showGemini",
+  cursor: "showCursor",
+  zai: "showZai",
   grok: "showGrok",
   grokBot: "showGrokBot",
   qoder: "showQoderIde",
@@ -339,6 +341,50 @@ export function shareToolLines(usage: Usage, range: RangeKey, visibility: Record
       hit: positive(r.hit),
     });
   }
+  if (visible("cursor")) {
+    const quota = (usage.cursor as { usage?: { ranges?: Ranges<TokenUsageRange> } | null } | undefined);
+    const r = getRange(quota?.usage?.ranges, range, {} as TokenUsageRange);
+    const total = totalTokens(r);
+    const hasComponents = n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + n(r.reason) > 0;
+    push({
+      id: "cursor",
+      name: "Cursor",
+      cost_cny: positive(r.cost_cny),
+      cost: positive(r.cost),
+      tokens: total > 0 ? total : null,
+      sessions: positive(r.sessions),
+      calls: positive(r.requests),
+      input: hasComponents ? n(r.in) : null,
+      output: hasComponents ? n(r.out) : null,
+      cacheRead: positive(r.cr),
+      cacheWrite: positive(r.cw),
+      reason: positive(r.reason),
+      hit: positive(r.hit),
+      extra: null,
+    });
+  }
+  if (visible("zai")) {
+    const quota = (usage.zai as { usage?: { ranges?: Ranges<TokenUsageRange> } | null } | undefined);
+    const r = getRange(quota?.usage?.ranges, range, {} as TokenUsageRange);
+    const total = totalTokens(r);
+    const hasComponents = n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + n(r.reason) > 0;
+    push({
+      id: "zai",
+      name: "z.ai",
+      cost_cny: positive(r.cost_cny),
+      cost: positive(r.cost),
+      tokens: total > 0 ? total : null,
+      sessions: positive(r.sessions),
+      calls: positive(r.requests),
+      input: hasComponents ? n(r.in) : null,
+      output: hasComponents ? n(r.out) : null,
+      cacheRead: positive(r.cr),
+      cacheWrite: positive(r.cw),
+      reason: positive(r.reason),
+      hit: positive(r.hit),
+      extra: null,
+    });
+  }
   if (visible("grok")) {
     const r = rangeOf<GrokShareRange>(usage, "grok", range);
     const available = r.usage_available === true;
@@ -366,16 +412,17 @@ export function shareToolLines(usage: Usage, range: RangeKey, visibility: Record
     push({
       id: "grok-bot",
       name: "Grok Bot",
+      cost_cny: positive(account.cost_cny),
       cost: positive(account.cost),
       tokens: total > 0 ? total : null,
-      sessions: n(r.sessions),
-      calls: n(account.requests) > 0 ? n(account.requests) : positive(r.calls),
+      sessions: positive(r.sessions) ?? positive(account.sessions),
+      calls: n(account.requests) > 0 ? n(account.requests) : (positive(r.calls) ?? positive(r.turns)),
       input: hasComponents ? n(account.in) : null,
       output: hasComponents ? n(account.out) : null,
       cacheRead: positive(account.cr),
       cacheWrite: positive(account.cw),
-      reason: null,
-      hit: null,
+      reason: positive(account.reason),
+      hit: positive(account.hit),
       extra: n(r.turns) > 0 ? L("%@ 条消息", n(r.turns)) : null,
     });
   }
@@ -481,6 +528,8 @@ const TINTS: Record<string, RGB> = {
   Codex: Theme.codex,
   "Luna Reserve": Theme.codex,
   Gemini: Theme.gemini,
+  Cursor: Theme.cursor,
+  "z.ai": Theme.zai,
   Grok: Theme.grok,
   "Grok Bot": Theme.grokBot,
   "Qoder Desktop": Theme.qoder,
