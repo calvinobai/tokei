@@ -283,6 +283,7 @@ GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
 ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
+ANTIGRAVITY_CREDENTIALS_CACHE = _writable_path("antigravity_credentials.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -6657,6 +6658,27 @@ def _provider_credential_marker(provider, *parts):
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _provider_quota_exhausted_reset_at(quota, now_epoch=None):
+    """当任一窗口用量满 (used_pct >= 100) 且有未来的 reset 时返回最早重置时间戳。"""
+    if not isinstance(quota, dict):
+        return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    exhausted_resets = []
+    for window in quota.get("windows") or []:
+        if not isinstance(window, dict):
+            continue
+        used = window.get("used_pct")
+        reset = window.get("reset")
+        try:
+            if used is not None and float(used) >= 100.0 and reset is not None:
+                reset_epoch = float(reset)
+                if reset_epoch > now:
+                    exhausted_resets.append(reset_epoch)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return min(exhausted_resets) if exhausted_resets else None
+
+
 def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=False):
     with _PROVIDER_QUOTA_CACHE_LOCK:
         root = _load_json(PROVIDER_QUOTA_CACHE, {})
@@ -6668,6 +6690,13 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
     if fetched_at is None or not isinstance(quota, dict):
         return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    if exhausted_until is not None and now_epoch < exhausted_until:
+        out = json.loads(json.dumps(quota))
+        if stale:
+            out["stale"] = True
+            out["source"] = "cache"
+        return out
     age = now_epoch - int(fetched_at)
     if age < -300 or age > max_age:
         return None
@@ -6690,6 +6719,13 @@ def _latest_cached_provider_quota(provider, max_age=None, now_epoch=None, stale=
     now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
     if fetched_at is None or not isinstance(quota, dict):
         return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    if exhausted_until is not None and now_epoch < exhausted_until:
+        out = json.loads(json.dumps(quota))
+        if stale:
+            out["stale"] = True
+            out["source"] = "cache"
+        return out
     age = now_epoch - int(fetched_at)
     if age < -300 or (max_age is not None and age > max_age):
         return None
@@ -8492,6 +8528,172 @@ def _windows_powershell(script, timeout=10):
     return result.stdout.decode("utf-8", errors="replace")
 
 
+def _antigravity_proc_env(pid):
+    """读取指定进程的环境变量字典（支持 macOS 与 Linux）。"""
+    if not pid or pid <= 0:
+        return {}
+    if not _IS_WINDOWS and sys.platform == "darwin":
+        try:
+            import ctypes, ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN = 1, KERN_PROCARGS2 = 49
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                return {}
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                return {}
+            raw = buf.raw
+            if len(raw) < 8:
+                return {}
+            argc = int.from_bytes(raw[:4], byteorder="little")
+            pos = 4
+            end = raw.find(b"\0", pos)
+            if end == -1:
+                return {}
+            pos = end
+            while pos < len(raw) and raw[pos] == 0:
+                pos += 1
+            for _ in range(argc):
+                end = raw.find(b"\0", pos)
+                if end == -1:
+                    break
+                pos = end + 1
+            env = {}
+            while pos < len(raw):
+                end = raw.find(b"\0", pos)
+                if end == -1:
+                    break
+                entry = raw[pos:end]
+                if entry:
+                    try:
+                        line = entry.decode("utf-8", "ignore")
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            env[k] = v
+                    except Exception:
+                        pass
+                pos = end + 1
+            return env
+        except Exception:
+            return {}
+    elif not _IS_WINDOWS and sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{int(pid)}/environ", "rb") as f:
+                raw = f.read()
+            env = {}
+            for entry in raw.split(b"\0"):
+                if not entry:
+                    continue
+                try:
+                    line = entry.decode("utf-8", "ignore")
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        env[k] = v
+                except Exception:
+                    pass
+            return env
+        except Exception:
+            return {}
+    return {}
+
+
+def _discover_antigravity_credentials(processes=None):
+    """发现并缓存 Antigravity 的 CSRF Token 与服务端口。"""
+    # 1. 优先读取系统环境变量 (如由 agy 子进程或当前终端环境启动)
+    token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
+    addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
+    if token:
+        port = _provider_integer(addr.split(":")[-1]) if addr and ":" in addr else None
+        return {p["pid"]: (token, port) for p in (processes or [])} or {0: (token, port)}
+
+    # 2. 读取持久化凭据缓存
+    cached_root = _load_json(ANTIGRAVITY_CREDENTIALS_CACHE, {})
+    cached_creds = cached_root.get("credentials") if isinstance(cached_root, dict) and isinstance(cached_root.get("credentials"), dict) else {}
+
+    discovered = {}
+    missing_procs = []
+    for proc in (processes or []):
+        pid_str = str(proc.get("pid"))
+        if pid_str in cached_creds:
+            c = cached_creds[pid_str]
+            if isinstance(c, dict) and c.get("token"):
+                discovered[proc["pid"]] = (c.get("token"), c.get("port"))
+                continue
+        missing_procs.append(proc)
+
+    # 3. 检查进程自身环境 (针对 cli 进程)
+    for proc in missing_procs:
+        env = _antigravity_proc_env(proc.get("pid"))
+        t = env.get("ANTIGRAVITY_CSRF_TOKEN")
+        a = env.get("ANTIGRAVITY_LS_ADDRESS")
+        if t:
+            port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+            discovered[proc["pid"]] = (t, port)
+
+    # 4. 如果还有进程未找到 CSRF token，扫描当前系统上运行的进程环境
+    needed = [p for p in (processes or []) if p["pid"] not in discovered]
+    if needed and not _IS_WINDOWS and sys.platform == "darwin":
+        try:
+            import ctypes, ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            out = subprocess.run(["/bin/ps", "-ax", "-o", "pid="],
+                                 capture_output=True, text=True, timeout=2, check=False).stdout
+            pids = [int(p) for p in out.split() if p.isdigit()]
+            for p in pids:
+                mib = (ctypes.c_int * 3)(1, 49, p)
+                size = ctypes.c_size_t(0)
+                if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                    continue
+                buf = ctypes.create_string_buffer(size.value)
+                if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                    continue
+                raw = buf.raw
+                if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
+                    continue
+                t, a = None, None
+                for part in raw.split(b"\0"):
+                    if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                        t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                    elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
+                        a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                if t:
+                    port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+                    for proc in needed:
+                        discovered[proc["pid"]] = (t, port)
+                    discovered[0] = (t, port)
+                    break
+        except Exception:
+            pass
+    elif needed and not _IS_WINDOWS and sys.platform.startswith("linux"):
+        try:
+            import glob
+            for env_path in glob.glob("/proc/[0-9]*/environ"):
+                try:
+                    with open(env_path, "rb") as f:
+                        raw = f.read()
+                    if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
+                        continue
+                    t, a = None, None
+                    for part in raw.split(b"\0"):
+                        if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                            t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                        elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
+                            a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                    if t:
+                        port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+                        for proc in needed:
+                            discovered[proc["pid"]] = (t, port)
+                        discovered[0] = (t, port)
+                        break
+                except (OSError, IOError):
+                    continue
+        except Exception:
+            pass
+
+    return discovered
+
+
 def _antigravity_running_processes(now_epoch=None):
     if _antigravity_scan_recently_empty(now_epoch):
         return []
@@ -8508,6 +8710,28 @@ def _antigravity_running_processes(now_epoch=None):
         except (OSError, subprocess.SubprocessError):
             return []
     processes = _antigravity_process_infos(output)
+    if processes:
+        discovered = _discover_antigravity_credentials(processes)
+        credentials_to_save = {}
+        for proc in processes:
+            token, port = discovered.get(proc["pid"], discovered.get(0, (None, None)))
+            if token and not proc.get("csrf_token"):
+                proc["csrf_token"] = token
+            if port and not proc.get("ls_port"):
+                proc["ls_port"] = port
+            if proc.get("csrf_token"):
+                credentials_to_save[str(proc["pid"])] = {
+                    "token": proc["csrf_token"],
+                    "port": proc.get("ls_port"),
+                }
+        if credentials_to_save:
+            try:
+                _atomic_write_json(ANTIGRAVITY_CREDENTIALS_CACHE, {
+                    "credentials": credentials_to_save,
+                    "updated": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
+                })
+            except OSError:
+                pass
     _record_antigravity_scan(bool(processes), now_epoch)
     return processes
 
@@ -8533,14 +8757,20 @@ def _antigravity_listening_ports(pid):
 
 def _antigravity_endpoints(process):
     endpoints = []
+    csrf = process.get("csrf_token") or ""
+    requires_csrf = bool(csrf)
     extension_port = process.get("extension_port")
     if extension_port:
-        for token in (process.get("extension_csrf_token"), process.get("csrf_token")):
+        for token in (process.get("extension_csrf_token"), csrf):
             if token is not None:
                 endpoints.append(("http", extension_port, token, True))
-    for port in _antigravity_listening_ports(process["pid"]):
-        endpoints.append(("https", port, process.get("csrf_token") or "",
-                          process.get("kind") != "cli"))
+    ports = list(_antigravity_listening_ports(process["pid"]))
+    ls_port = process.get("ls_port")
+    if ls_port and ls_port not in ports:
+        ports.insert(0, ls_port)
+    for port in ports:
+        endpoints.append(("http", port, csrf, requires_csrf))
+        endpoints.append(("https", port, csrf, requires_csrf))
     unique = []
     for endpoint in endpoints:
         if endpoint not in unique:
@@ -8550,8 +8780,11 @@ def _antigravity_endpoints(process):
 
 def _antigravity_request(endpoint, path, body):
     scheme, port, csrf, requires_csrf = endpoint
-    headers = {"Connect-Protocol-Version": "1"}
-    if requires_csrf:
+    headers = {
+        "Connect-Protocol-Version": "1",
+        "Content-Type": "application/json",
+    }
+    if requires_csrf and csrf:
         headers["X-Codeium-Csrf-Token"] = csrf
     return _provider_json_request(
         f"{scheme}://127.0.0.1:{port}{path}", headers=headers, method="POST", body=body,
@@ -8686,6 +8919,10 @@ def fetch_antigravity_quota():
         if fallback:
             return fallback
     if last_error:
+        try:
+            os.remove(ANTIGRAVITY_CREDENTIALS_CACHE)
+        except OSError:
+            pass
         raise last_error
     return {}
 

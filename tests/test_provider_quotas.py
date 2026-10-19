@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -797,6 +798,100 @@ class ProviderQuotaTests(unittest.TestCase):
             self.assertNotIn(provider, snapshot)
         self.assertEqual(snapshot["grok_bot"], payload["grok_bot"])
         self.assertIn("cursor", payload)
+
+    def test_antigravity_proc_env_edge_cases(self):
+        self.assertEqual(USAGE._antigravity_proc_env(0), {})
+        self.assertEqual(USAGE._antigravity_proc_env(-1), {})
+        self.assertEqual(USAGE._antigravity_proc_env(None), {})
+
+    def test_antigravity_discover_credentials_from_environ(self):
+        with mock.patch.dict(os.environ, {
+            "ANTIGRAVITY_CSRF_TOKEN": "env-token",
+            "ANTIGRAVITY_LS_ADDRESS": "localhost:63041",
+        }):
+            creds = USAGE._discover_antigravity_credentials([{"pid": 12345}])
+            self.assertEqual(creds[12345], ("env-token", 63041))
+
+    def test_antigravity_discover_credentials_from_cache_and_proc_env(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=True):
+            self.isolate_cache(Path(tmp))
+            cred_cache = Path(tmp) / "antigravity_credentials.json"
+            cred_cache.write_text(json.dumps({
+                "credentials": {"123": {"token": "cached-token", "port": 50001}}
+            }))
+            with mock.patch.object(USAGE, "ANTIGRAVITY_CREDENTIALS_CACHE", str(cred_cache)):
+                creds = USAGE._discover_antigravity_credentials([{"pid": 123}, {"pid": 456}])
+                self.assertEqual(creds[123], ("cached-token", 50001))
+
+            with mock.patch.object(USAGE, "ANTIGRAVITY_CREDENTIALS_CACHE", str(Path(tmp) / "missing.json")), \
+                    mock.patch.object(USAGE, "_antigravity_proc_env", return_value={
+                        "ANTIGRAVITY_CSRF_TOKEN": "proc-token",
+                        "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:50002",
+                    }):
+                creds = USAGE._discover_antigravity_credentials([{"pid": 456}])
+                self.assertEqual(creds[456], ("proc-token", 50002))
+
+    def test_antigravity_endpoints_dual_protocol_and_csrf(self):
+        process = {"pid": 999, "csrf_token": "token-xyz", "ls_port": 63041}
+        with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[63040, 63041]):
+            endpoints = USAGE._antigravity_endpoints(process)
+            self.assertIn(("http", 63040, "token-xyz", True), endpoints)
+            self.assertIn(("https", 63040, "token-xyz", True), endpoints)
+            self.assertIn(("http", 63041, "token-xyz", True), endpoints)
+            self.assertIn(("https", 63041, "token-xyz", True), endpoints)
+
+        no_csrf = {"pid": 999, "csrf_token": ""}
+        with mock.patch.object(USAGE, "_antigravity_listening_ports", return_value=[63040]):
+            endpoints = USAGE._antigravity_endpoints(no_csrf)
+            self.assertIn(("http", 63040, "", False), endpoints)
+            self.assertIn(("https", 63040, "", False), endpoints)
+
+    def test_antigravity_fetch_fallback_on_http_or_ssl_error(self):
+        process = {"pid": 888, "csrf_token": "valid-token"}
+        endpoints = [
+            ("http", 63040, "valid-token", True),
+            ("https", 63040, "valid-token", True),
+        ]
+        summary = {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-5h", "remainingFraction": 0.8},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            with mock.patch.object(USAGE, "_antigravity_running_processes", return_value=[process]), \
+                    mock.patch.object(USAGE, "_antigravity_endpoints", return_value=endpoints):
+                # 第一次请求 (http) 报 400，第二次请求 (https) 成功
+                with mock.patch.object(USAGE, "_antigravity_request",
+                                       side_effect=[RuntimeError("HTTP 400"), summary, {}]) as request:
+                    quota = USAGE.fetch_antigravity_quota()
+                    self.assertTrue(quota["available"])
+                    self.assertEqual(quota["windows"][1]["used_pct"], 20.0)
+                    self.assertEqual(request.call_count, 3)
+
+    def test_antigravity_quota_exhausted_sleep_retention(self):
+        quota = {
+            "available": True,
+            "windows": [
+                {"id": "antigravity-gemini-weekly", "used_pct": 50.0, "reset": 1800003600},
+                {"id": "antigravity-gemini-5h", "used_pct": 100.0, "reset": 1800001800},
+            ],
+            "updated": 1800000000,
+        }
+        reset_at = USAGE._provider_quota_exhausted_reset_at(quota, now_epoch=1800000100)
+        self.assertEqual(reset_at, 1800001800.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.isolate_cache(Path(tmp))
+            marker = "exhausted-marker"
+            USAGE._save_provider_quota_cache("antigravity", marker, quota, fetched_at=1800000000)
+
+            # 在 reset 之前，即使超过常规 TTL（如 300 秒），也依然复用缓存
+            cached = USAGE._cached_provider_quota("antigravity", marker, max_age=60, now_epoch=1800000500)
+            self.assertIsNotNone(cached)
+            self.assertTrue(cached["available"])
+
+            # 超过 reset 之后，正常过期返回 None
+            expired = USAGE._cached_provider_quota("antigravity", marker, max_age=60, now_epoch=1800002000)
+            self.assertIsNone(expired)
 
 
 if __name__ == "__main__":
