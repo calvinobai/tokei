@@ -394,10 +394,10 @@ private func nativeToolCard(
             if let extra = line.extra, !extra.isEmpty {
                 if extra.contains("Credits") {
                     MetricCell(icon: "sparkles", label: L("额度"), value: extra, tint: tint)
-                } else if extra.contains("消息") {
-                    MetricCell(icon: "bubble.left", label: L("消息"), value: extra, tint: tint)
+                } else if extra.contains("消息") { // l10n-ignore
+                    MetricCell(icon: "bubble.left", label: L("消息数"), value: extra, tint: tint)
                 } else {
-                    MetricCell(icon: "info.circle", label: L("附注"), value: extra, tint: tint)
+                    MetricCell(icon: "info.circle", label: L("信息"), value: extra, tint: tint)
                 }
             }
         }
