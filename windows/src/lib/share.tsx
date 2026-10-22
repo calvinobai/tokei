@@ -29,6 +29,8 @@ const VISIBILITY_KEYS = {
   claude: "showClaude",
   codex: "showCodex",
   gemini: "showGemini",
+  cursor: "showCursor",
+  zai: "showZai",
   grok: "showGrok",
   grokBot: "showGrokBot",
   qoder: "showQoderIde",
@@ -59,7 +61,10 @@ type VisibilityField = keyof typeof VISIBILITY_KEYS;
 /** 从偏好读出当前的显示开关（与 Mac 版 PanelView.toolVisibility 同一组键）。 */
 export function currentShareVisibility(): Record<string, boolean> {
   const result: Record<string, boolean> = {};
-  for (const key of Object.values(VISIBILITY_KEYS)) result[key] = getPref<boolean>(key, true);
+  for (const key of Object.values(VISIBILITY_KEYS)) {
+    const fallback = key !== "showCursor" && key !== "showZai";
+    result[key] = getPref<boolean>(key, fallback);
+  }
   return result;
 }
 
@@ -116,6 +121,8 @@ function isEmptyLine(line: ShareLine): boolean {
 const sum = (values: (number | null | undefined)[]) => values.reduce<number>((acc, v) => acc + (v ?? 0), 0);
 
 export function shareTotals(lines: ShareLine[]): ShareTotals {
+  // Provider account aggregates can describe the same requests as local logs.
+  lines = lines.filter((line) => line.id !== "cursor" && line.id !== "zai");
   return {
     cost_cny: sum(lines.map((l) => l.cost_cny)),
     cost: sum(lines.map((l) => l.cost)),
@@ -339,6 +346,50 @@ export function shareToolLines(usage: Usage, range: RangeKey, visibility: Record
       hit: positive(r.hit),
     });
   }
+  if (visible("cursor")) {
+    const quota = (usage.cursor as { usage?: { ranges?: Ranges<TokenUsageRange> } | null } | undefined);
+    const r = getRange(quota?.usage?.ranges, range, {} as TokenUsageRange);
+    const total = totalTokens(r);
+    const hasComponents = n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + n(r.reason) > 0;
+    push({
+      id: "cursor",
+      name: "Cursor",
+      cost_cny: positive(r.cost_cny),
+      cost: positive(r.cost),
+      tokens: total > 0 ? total : null,
+      sessions: positive(r.sessions),
+      calls: positive(r.requests),
+      input: hasComponents ? n(r.in) : null,
+      output: hasComponents ? n(r.out) : null,
+      cacheRead: positive(r.cr),
+      cacheWrite: positive(r.cw),
+      reason: positive(r.reason),
+      hit: positive(r.hit),
+      extra: null,
+    });
+  }
+  if (visible("zai")) {
+    const quota = (usage.zai as { usage?: { ranges?: Ranges<TokenUsageRange> } | null } | undefined);
+    const r = getRange(quota?.usage?.ranges, range, {} as TokenUsageRange);
+    const total = totalTokens(r);
+    const hasComponents = n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + n(r.reason) > 0;
+    push({
+      id: "zai",
+      name: "z.ai",
+      cost_cny: positive(r.cost_cny),
+      cost: positive(r.cost),
+      tokens: total > 0 ? total : null,
+      sessions: positive(r.sessions),
+      calls: positive(r.requests),
+      input: hasComponents ? n(r.in) : null,
+      output: hasComponents ? n(r.out) : null,
+      cacheRead: positive(r.cr),
+      cacheWrite: positive(r.cw),
+      reason: positive(r.reason),
+      hit: positive(r.hit),
+      extra: null,
+    });
+  }
   if (visible("grok")) {
     const r = rangeOf<GrokShareRange>(usage, "grok", range);
     const available = r.usage_available === true;
@@ -366,16 +417,17 @@ export function shareToolLines(usage: Usage, range: RangeKey, visibility: Record
     push({
       id: "grok-bot",
       name: "Grok Bot",
+      cost_cny: positive(account.cost_cny),
       cost: positive(account.cost),
       tokens: total > 0 ? total : null,
-      sessions: n(r.sessions),
-      calls: n(account.requests) > 0 ? n(account.requests) : positive(r.calls),
+      sessions: positive(r.sessions) ?? positive(account.sessions),
+      calls: n(account.requests) > 0 ? n(account.requests) : (positive(r.calls) ?? positive(r.turns)),
       input: hasComponents ? n(account.in) : null,
       output: hasComponents ? n(account.out) : null,
       cacheRead: positive(account.cr),
       cacheWrite: positive(account.cw),
-      reason: null,
-      hit: null,
+      reason: positive(account.reason),
+      hit: positive(account.hit),
       extra: n(r.turns) > 0 ? L("%@ 条消息", n(r.turns)) : null,
     });
   }
@@ -481,6 +533,8 @@ const TINTS: Record<string, RGB> = {
   Codex: Theme.codex,
   "Luna Reserve": Theme.codex,
   Gemini: Theme.gemini,
+  Cursor: Theme.cursor,
+  "z.ai": Theme.zai,
   Grok: Theme.grok,
   "Grok Bot": Theme.grokBot,
   "Qoder Desktop": Theme.qoder,
@@ -803,7 +857,7 @@ function drawShareHeader(
   return h;
 }
 
-function lineCells(line: ShareLine, tint: RGB): Cell[] {
+export function shareLineCells(line: ShareLine, tint: RGB): Cell[] {
   const cells: Cell[] = [];
   if (line.cost != null && (line.cost > 0 || (line.cost_cny ?? 0) > 0)) {
     cells.push(metricCell("dollarsign.circle", L("≈成本"), Fmt.nativeMoney(line.cost, line.cost_cny), tint));
@@ -815,7 +869,15 @@ function lineCells(line: ShareLine, tint: RGB): Cell[] {
   if ((line.cacheWrite ?? 0) > 0) cells.push(metricCell("square.stack.3d.up.fill", L("缓存写"), Fmt.human(line.cacheWrite ?? 0), tint));
   if ((line.reason ?? 0) > 0) cells.push(metricCell("brain", L("推理"), Fmt.human(line.reason ?? 0), tint));
   if ((line.calls ?? 0) > 0) cells.push(metricCell("waveform", L("调用"), String(line.calls), tint));
+  if (line.extra) cells.push(metricCell("bubble.left.and.bubble.right", L("信息"), line.extra, tint));
   return cells;
+}
+
+/** The same headline drives both measured height and rendered text. */
+export function shareLineHeadline(line: ShareLine, periodLabel: string): { value: string; caption: string } | null {
+  if ((line.tokens ?? 0) > 0) return { value: Fmt.human(line.tokens ?? 0), caption: L("%@ 总量", periodLabel) };
+  if ((line.calls ?? 0) > 0) return { value: Fmt.human(line.calls ?? 0), caption: L("%@ 响应", periodLabel) };
+  return null;
 }
 
 /** 一个工具的卡片（nativeToolCard）：色点 + 名称 + 会话数、总量、指标格。 */
@@ -835,10 +897,10 @@ function drawToolCard(
   const nameSize = compact ? 13 : 14;
   const sessions = line.sessions ?? 0;
   const headH = Math.max(lh(nameSize), sessions > 0 ? lh(10) + 3 : 0, 8);
-  const hasTokens = (line.tokens ?? 0) > 0;
-  const cells = lineCells(line, tint);
+  const headline = shareLineHeadline(line, periodLabel);
+  const cells = shareLineCells(line, tint);
   let h = pad + headH;
-  if (hasTokens) h += 10 + lh(fs(23));
+  if (headline) h += 10 + lh(fs(23));
   if (cells.length) h += 10 + drawGrid(null, cells, 0, 0, inner, 8, f);
   h += pad;
   if (!ctx) return h;
@@ -869,9 +931,9 @@ function drawToolCard(
   if (sessions > 0) sessionsCapsule(ctx, sessions, left + 15 + nameW + 7, headCenter, tint, f);
   cy += headH;
 
-  if (hasTokens) {
+  if (headline) {
     cy += 10;
-    cy += drawHeadline(ctx, Fmt.human(line.tokens ?? 0), L("%@ 总量", periodLabel), left, cy, inner, f);
+    cy += drawHeadline(ctx, headline.value, headline.caption, left, cy, inner, f);
   }
   if (cells.length) {
     cy += 10;

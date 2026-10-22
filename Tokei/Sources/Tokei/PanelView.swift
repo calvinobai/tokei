@@ -114,7 +114,9 @@ struct PanelView: View {
 
     private var toolVisibility: UsageToolVisibility {
         UsageToolVisibility(
-            claude: showClaude, codex: showCodex, gemini: showGemini, grok: showGrok,
+            claude: showClaude, codex: showCodex, gemini: showGemini,
+            cursor: showCursor, zed: showZed, sub2api: showSub2API, zai: showZai,
+            grok: showGrok,
             grokBot: showGrokBot,
             qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
             qodercliCN: showQoderCliCN,
@@ -456,6 +458,7 @@ struct PanelView: View {
                          content: AnyView(providerQuotaBlock(
                             "Cursor", quota: u.cursor, usage: cursorUsage,
                             modelsOpen: $cursorModelsOpen, tint: Theme.cursor,
+                            toolID: "cursor",
                             setupHint: L("请确认 Cursor.app 已登录；Tokei 会复用其本地登录态读取额度。")))),
             ToolCardItem(id: "zed", name: "Zed", visible: showZed, active: showZed,
                          tint: Theme.zed, presentation: .compactStatus,
@@ -474,6 +477,7 @@ struct PanelView: View {
                          content: AnyView(providerQuotaBlock(
                             "z.ai / GLM", quota: u.zai, usage: zaiUsage,
                             modelsOpen: $zaiModelsOpen, tint: Theme.zai,
+                            toolID: "zai",
                             setupHint: L("请在设置的「Provider 额度」中选择区域并保存 API Key。")))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
@@ -1000,14 +1004,16 @@ struct PanelView: View {
         usage: TokenUsageRange? = nil,
         modelsOpen: Binding<Bool>? = nil,
         tint: Color,
+        toolID: String? = nil,
+        range: RangeKey? = nil,
         setupHint: String
     ) -> some View {
-        let range = usage ?? TokenUsageRange()
-        let hasUsage = range.totalTokens > 0 || range.requests > 0
+        let rangeData = usage ?? TokenUsageRange()
+        let hasUsage = rangeData.totalTokens > 0 || rangeData.requests > 0
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain(title, tint: tint)
+            cardHeadPlain(title, tint: tint, toolID: hasUsage ? toolID : nil, range: range)
             if hasUsage {
-                providerTokenUsageContent(range, modelsOpen: modelsOpen, tint: tint)
+                providerTokenUsageContent(rangeData, modelsOpen: modelsOpen, tint: tint)
             }
             if quota.available {
                 if hasUsage { thinDivider }
@@ -1181,8 +1187,10 @@ struct PanelView: View {
         let hasActivity = r.sessions > 0 || r.calls > 0 || r.turns > 0
         let hasUsage = usage.totalTokens > 0 || usage.requests > 0
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Grok Bot", tint: Theme.grokBot, sessions: r.sessions,
-                     toolID: hasActivity && displayedRange == sel ? "grok-bot" : nil)
+            cardHead("Grok Bot", tint: Theme.grokBot,
+                     sessions: r.sessions > 0 ? r.sessions : usage.sessions,
+                     toolID: (hasActivity || hasUsage) ? "grok-bot" : nil,
+                     range: displayedRange)
             if hasUsage {
                 if displayedRange != sel {
                     Text(L("%@暂无活动，显示%@最近记录", sel.label, displayedRange.label))
@@ -2125,7 +2133,7 @@ struct PanelView: View {
         return denom > 0 ? Double(m.cr) / Double(denom) * 100 : 0
     }
 
-    func cardHead(_ title: String, tint: Color, sessions: Int = 0, toolID: String? = nil) -> some View {
+    func cardHead(_ title: String, tint: Color, sessions: Int = 0, toolID: String? = nil, range: RangeKey? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
@@ -2139,29 +2147,29 @@ struct PanelView: View {
             }
             Spacer()
             if let toolID {
-                cardCopyButton(toolID: toolID, tint: tint)
+                cardCopyButton(toolID: toolID, tint: tint, range: range)
             }
         }
     }
 
     // 无命中环的卡头(Grok 无缓存命中数据)。
-    func cardHeadPlain(_ title: String, tint: Color, toolID: String? = nil) -> some View {
+    func cardHeadPlain(_ title: String, tint: Color, toolID: String? = nil, range: RangeKey? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
             Text(title).font(.system(size: Theme.fontSize(14), weight: .bold))
             Spacer()
             if let toolID {
-                cardCopyButton(toolID: toolID, tint: tint)
+                cardCopyButton(toolID: toolID, tint: tint, range: range)
             }
         }
     }
 
     @ViewBuilder
-    private func cardCopyButton(toolID: String, tint: Color) -> some View {
+    private func cardCopyButton(toolID: String, tint: Color, range: RangeKey? = nil) -> some View {
         let done = copiedToolID == toolID
         Button {
-            copySingleToolImage(id: toolID)
+            copySingleToolImage(id: toolID, range: range)
         } label: {
             Image(systemName: done ? "checkmark" : "photo.on.rectangle")
                 .font(.system(size: Theme.fontSize(10), weight: .semibold))
@@ -2665,13 +2673,14 @@ struct PanelView: View {
     }
 
     /// Generate a single-tool share card (native-style) for one agent/card.
-    private func copySingleToolImage(id: String) {
+    private func copySingleToolImage(id: String, range: RangeKey? = nil) {
+        let targetRange = range ?? sel
         guard let usage = store.usage,
               let line = UsageSummaryBuilder.line(
-                forToolID: id, usage: usage, range: sel, visibility: toolVisibility
+                forToolID: id, usage: usage, range: targetRange, visibility: toolVisibility
               ) else { return }
         let ok = UsageShareImage.copyToPasteboard(
-            line: line, range: sel, updated: store.lastUpdated
+            line: line, range: targetRange, updated: store.lastUpdated
         )
         guard ok else { return }
         copyFeedback = false
