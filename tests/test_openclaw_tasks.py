@@ -18,6 +18,11 @@ try:
 except ImportError:
     _zstandard = None
 
+try:
+    from compression import zstd as _stdlib_zstd
+except ImportError:
+    _stdlib_zstd = None
+
 ZSTANDARD_AVAILABLE = _zstandard is not None
 
 
@@ -119,15 +124,16 @@ class OpenClawTaskTests(unittest.TestCase):
         """)
         connection.execute("CREATE TABLE session_transcript_fts (event_json TEXT NOT NULL)")
         if zstd:
-            if _zstandard is None:
+            if _stdlib_zstd is None and _zstandard is None:
                 connection.close()
-                self.skipTest("zstandard not installed")
-            compressor = _zstandard.ZstdCompressor()
+                self.skipTest("no zstd encoder available")
+            compress = (_stdlib_zstd.compress if _stdlib_zstd is not None
+                        else _zstandard.ZstdCompressor().compress)
             rows = []
             for seq, (session_id, event, created_ms) in enumerate(events, 1):
                 payload = json.dumps(event).encode("utf-8")
                 rows.append((session_id, seq, None, created_ms,
-                             compressor.compress(payload), len(payload)))
+                             compress(payload), len(payload)))
             connection.executemany(
                 "INSERT INTO transcript_events VALUES (?, ?, ?, ?, ?, ?)", rows)
         else:
@@ -753,6 +759,85 @@ class OpenClawTaskTests(unittest.TestCase):
         self.assertIsNone(USAGE._openclaw_zstd_blob(None))
         self.assertIsNone(USAGE._openclaw_zstd_blob("a string"))
 
+
+
+    def test_decoder_recovery_rescans_unchanged_database(self):
+        """A fresh process with a decoder must recover an unchanged DB's usage.
+
+        Stdlib zstd supplies real fixture bytes on Python 3.14. The decoder
+        callback models the optional dependency becoming available; this test
+        checks cache identity rather than python-zstandard's implementation.
+        """
+        try:
+            from compression import zstd
+        except ImportError:
+            self.skipTest("fixture requires Python 3.14 stdlib zstd")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_db = root / "state" / "openclaw.sqlite"
+            agent_db = root / "agents" / "example" / "agent.sqlite"
+            now = datetime.now().astimezone().replace(microsecond=0)
+            created_ms = int(now.timestamp() * 1000)
+            event = self.usage_event(
+                "decoder-recovery", now,
+                {"input": 120, "output": 30, "totalTokens": 150,
+                 "cost": {"total": 0.25}},
+            )
+            self.create_database(state_db, created_ms, [])
+            self.add_agent_registry(state_db, [os.path.relpath(agent_db, root)])
+            self.create_agent_database(agent_db, [])
+            with sqlite3.connect(agent_db) as connection:
+                connection.execute("DROP TABLE transcript_events")
+                connection.execute("""
+                    CREATE TABLE transcript_events (
+                        session_id TEXT, seq INTEGER, event_json TEXT,
+                        created_at INTEGER, event_zstd BLOB
+                    )
+                """)
+                connection.execute(
+                    "INSERT INTO transcript_events VALUES (?, ?, NULL, ?, ?)",
+                    ("recovery-session", 1, created_ms,
+                     zstd.compress(json.dumps(event).encode("utf-8"))),
+                )
+            connection.close()
+            original_signature = USAGE._sqlite_signature(str(agent_db))
+            entry_key = "sqlite:" + os.path.realpath(agent_db)
+
+            with mock.patch.object(USAGE, "_OPENCLAW_ZSTD_AVAILABLE", False), \
+                 mock.patch.object(USAGE, "_openclaw_zstd_blob",
+                                   return_value=None):
+                initial, cache = self.scan(
+                    state_db, root / "missing.sqlite", root / "agents")
+            self.assertEqual(initial["ranges"]["today"]["in"], 0)
+            old_version = cache["openclaw"][entry_key]["parser_version"]
+            self.assertEqual(cache["openclaw"][entry_key]["sig"],
+                             original_signature)
+
+            with mock.patch.object(USAGE, "_OPENCLAW_ZSTD_AVAILABLE", True), \
+                 mock.patch.object(USAGE, "_openclaw_zstd_blob",
+                                   side_effect=zstd.decompress) as decode:
+                recovered, cache = self.scan(
+                    state_db, root / "missing.sqlite", root / "agents",
+                    cache=cache)
+                self.assertEqual(recovered["ranges"]["today"]["in"], 120)
+                self.assertEqual(recovered["ranges"]["today"]["out"], 30)
+                self.assertEqual(recovered["ranges"]["today"]["sessions"],
+                                 {"recovery-session"})
+                decode.assert_called_once()
+                # A warm pass must reuse the recovered entry.
+                with mock.patch.object(
+                        USAGE, "_scan_openclaw_agent_db",
+                        wraps=USAGE._scan_openclaw_agent_db) as scan_db:
+                    warm, _ = self.scan(
+                        state_db, root / "missing.sqlite", root / "agents",
+                        cache=cache)
+                scan_db.assert_not_called()
+                self.assertEqual(warm["ranges"]["today"]["in"], 120)
+
+            self.assertEqual(USAGE._sqlite_signature(str(agent_db)),
+                             original_signature)
+            self.assertEqual(cache["openclaw"][entry_key]["parser_version"],
+                             old_version)
 
 if __name__ == "__main__":
     unittest.main()

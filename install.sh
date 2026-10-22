@@ -69,20 +69,21 @@ for fname in usage.30s.py pricing.json pricing_overrides.json; do
     fi
 done
 
-# 4. 确保 zstandard 可导入：OpenClaw 新版把事件正文压缩进 event_zstd，
-#    缺依赖会静默跳过这部分用量。已装则跳过，装不上不阻断安装。
-if python3 -c 'import zstandard' >/dev/null 2>&1; then
-    echo "[✓] zstandard 已可用"
+# 4. 检测现有解码能力；安装器不修改系统 Python 或安装包。
+if python3 - >/dev/null 2>&1 <<'PY'
+try:
+    from compression import zstd
+except ImportError:
+    import zstandard
+PY
+then
+    echo "[✓] zstd 解码已可用"
 else
-    echo "[·] 安装 zstandard（读 OpenClaw 压缩事件正文）..."
-    if python3 -m pip install --quiet zstandard >/dev/null 2>&1 \
-            || python3 -m pip install --quiet --user zstandard >/dev/null 2>&1 \
-            || python3 -m pip install --quiet --break-system-packages zstandard >/dev/null 2>&1; then
-        echo "[✓] zstandard 安装完成"
-    else
-        echo "[!] zstandard 未安装：OpenClaw 压缩存储的用量事件将被跳过"
-        echo "    可手动执行: python3 -m pip install --user zstandard"
-    fi
+    echo "[!] 缺少 zstd 解码器：OpenClaw 压缩事件暂时跳过"
+    echo "    可使用 Python 3.14+，或手动创建隔离环境："
+    echo "    python3 -m venv \"$TOKEI_DIR/venv\""
+    echo "    \"$TOKEI_DIR/venv/bin/python\" -m pip install zstandard"
+    echo "    安装后请用该隔离解释器运行采集器，并相应调整同步脚本的 python3。"
 fi
 
 # 5. 写配置
