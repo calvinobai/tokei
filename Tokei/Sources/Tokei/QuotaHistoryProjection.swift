@@ -245,25 +245,30 @@ struct QuotaHistoryProjection {
                 previous[window] = (remaining, point.timestamp)
             }
         }
-        let daily: [QuotaDailyConsumption] = days.flatMap { window, byDay -> [QuotaDailyConsumption] in
+        var consumptions: [QuotaDailyConsumption] = []
+        for (window, byDay) in days {
             let oldest = byDay.keys.min()
-            return byDay.map { start, day in
-                let missingHistory = start == oldest
-                    && TimeInterval(day.first) - start.timeIntervalSince1970 > edgeTolerance
-                return QuotaDailyConsumption(
+            for (start, day) in byDay {
+                let dayFirstInterval = TimeInterval(day.first)
+                let startInterval = start.timeIntervalSince1970
+                let missingHistory: Bool = (start == oldest) && ((dayFirstInterval - startInterval) > edgeTolerance)
+                let isComplete: Bool = !day.uncertain && !missingHistory
+                consumptions.append(QuotaDailyConsumption(
                     dayStart: start,
                     window: window,
                     consumed: day.consumed,
                     refills: day.refills,
-                    isComplete: !day.uncertain && !missingHistory
-                )
+                    isComplete: isComplete
+                ))
             }
         }
-        return daily.sorted { lhs, rhs in
-            if lhs.dayStart != rhs.dayStart { return lhs.dayStart > rhs.dayStart }
-            let leftIndex = tool.windowNames.firstIndex(of: lhs.window) ?? 0
-            let rightIndex = tool.windowNames.firstIndex(of: rhs.window) ?? 0
-            return leftIndex < rightIndex
+        return consumptions.sorted { a, b in
+            if a.dayStart != b.dayStart {
+                return a.dayStart > b.dayStart
+            }
+            let aIdx = tool.windowNames.firstIndex(of: a.window) ?? 0
+            let bIdx = tool.windowNames.firstIndex(of: b.window) ?? 0
+            return aIdx < bIdx
         }
     }
 
