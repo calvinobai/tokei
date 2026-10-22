@@ -828,6 +828,12 @@ if let idx = CommandLine.arguments.firstIndex(of: "--mode"),
     PanelView.initialMode = modes[CommandLine.arguments[idx + 1]] ?? .cards
 }
 
+if let idx = CommandLine.arguments.firstIndex(of: "--quota-detail-json"),
+   CommandLine.arguments.count > idx + 1 {
+    // PR 截图用合成的周期数据：Tokei --usage u.json --quota-detail-json q.json --shot out.png
+    QuotaDetailRepository.fixtureURL = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
+}
+
 if CommandLine.arguments.contains("--expand-models") {
     PanelView.expandModelsForShot = true
 }

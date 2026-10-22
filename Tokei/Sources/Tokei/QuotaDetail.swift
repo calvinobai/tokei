@@ -62,25 +62,31 @@ struct QuotaDetailPayload: Codable {
 }
 
 final class QuotaDetailRepository: ObservableObject {
-    static let shared = QuotaDetailRepository()
+    /// 离屏截图用的合成数据（`--quota-detail-json`）：只读，不跑脚本也不回写。
+    static var fixtureURL: URL?
+    static let shared = fixtureURL.map { QuotaDetailRepository(fileURL: $0, readOnly: true) }
+        ?? QuotaDetailRepository()
 
     @Published private(set) var payload: QuotaDetailPayload?
     @Published private(set) var refreshing = false
 
     private let fileURL: URL
+    private let readOnly: Bool
     private var loadedAt: Date?
     private var forcedReloadPending = false
     private let freshness: TimeInterval = 30
 
     init(fileURL: URL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".tokei/quota_detail.json")) {
+            .appendingPathComponent(".tokei/quota_detail.json"), readOnly: Bool = false) {
         self.fileURL = fileURL
+        self.readOnly = readOnly
         // 脚本要跑 1~3 秒,先把上次的结果摆出来,别让人对着空面板等。
         payload = (try? Data(contentsOf: fileURL))
             .flatMap { try? JSONDecoder().decode(QuotaDetailPayload.self, from: $0) }
     }
 
     func load(force: Bool = false) {
+        if readOnly { return }
         if !force, let loadedAt, Date().timeIntervalSince(loadedAt) < freshness {
             return
         }
