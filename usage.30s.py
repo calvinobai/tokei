@@ -959,7 +959,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 8
+_CODEX_PARSER_VERSION = 9
 _CODEX_ACCOUNTING_VERSION = 7
 
 
@@ -4072,38 +4072,50 @@ _CODEX_ITEM_STARTED = re.compile(rb'"started_at_ms":(\d+)')
 
 
 class _CodexZstdStream:
-    """Surface decode failures as OSError so one bad file cannot abort the scan."""
+    """Normalize decoder errors and own an optional CLI decoder process."""
 
-    def __init__(self, inner):
+    def __init__(self, inner, process=None):
         self._inner = inner
+        self._process = process
+
+    def _read(self, method, n):
+        try:
+            data = getattr(self._inner, method)(n)
+            if self._process is not None and (not data and n != 0 or n < 0):
+                status = self._process.wait(timeout=1)
+                if status:
+                    raise OSError(f"zstd decoder exited with status {status}")
+            return data
+        except OSError:
+            raise
+        except Exception as exc:
+            raise OSError(str(exc)) from exc
 
     def read(self, n=-1):
-        try:
-            return self._inner.read(n)
-        except OSError:
-            raise
-        except Exception as exc:
-            raise OSError(str(exc)) from exc
+        return self._read("read", n)
 
     def readline(self, n=-1):
-        try:
-            return self._inner.readline(n)
-        except OSError:
-            raise
-        except Exception as exc:
-            raise OSError(str(exc)) from exc
+        return self._read("readline", n)
 
     def __enter__(self):
         return self
 
     def __exit__(self, *exc_info):
-        self._inner.close()
+        try:
+            self._inner.close()
+        finally:
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
 
 
 def _open_codex_rollout(path):
-    """Open a Codex rollout for binary reading; .jsonl.zst is decompressed on the fly.
-
-    The compressed source is never rewritten."""
+    """Open a rollout without rewriting the compressed source."""
     path = os.fspath(path)
     if not path.endswith(".zst"):
         return open(path, "rb", buffering=0)
@@ -4114,21 +4126,35 @@ def _open_codex_rollout(path):
     except Exception:
         stream = None
     if stream is None:
+        source = None
         try:
+            import io
             import zstandard as _zstandard
-            stream = _zstandard.ZstdDecompressor().stream_reader(
-                open(path, "rb", buffering=0))
+            source = open(path, "rb", buffering=0)
+            stream = io.BufferedReader(
+                _zstandard.ZstdDecompressor().stream_reader(source))
         except Exception:
+            if source is not None:
+                source.close()
             stream = None
-    if stream is None:
-        for exe in ("/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"):
-            if os.path.exists(exe):
-                stream = subprocess.Popen([exe, "-dc", path],
-                                          stdout=subprocess.PIPE).stdout
-                break
-    if stream is None:
-        raise OSError("no zstd decoder available")
-    return _CodexZstdStream(stream)
+    if stream is not None:
+        return _CodexZstdStream(stream)
+    import shutil
+    candidates = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"]
+    path_exe = shutil.which("zstd")
+    if path_exe:
+        candidates.append(path_exe)
+    for exe in dict.fromkeys(candidates):
+        if not os.path.exists(exe):
+            continue
+        try:
+            process = subprocess.Popen([exe, "-dc", "--", path],
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, **_NO_WINDOW)
+        except OSError:
+            continue
+        return _CodexZstdStream(process.stdout, process)
+    raise OSError("no zstd decoder available")
 
 
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
