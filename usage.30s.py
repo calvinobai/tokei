@@ -10555,10 +10555,15 @@ def scan_hermes(bounds, cache):
 
 # ---------- OpenClaw ----------
 # 全局 SQLite: $OPENCLAW_STATE_DIR/state/openclaw.sqlite（任务 + agent DB 注册表）
-# Agent SQLite: agent_databases.path -> transcript_events.event_json（新版 token 用量）
+# Agent SQLite: agent_databases.path -> transcript_events（新版 token 用量）
+#   transcript_events 的事件正文有两种互斥存储：event_json(TEXT) 与
+#   event_zstd(BLOB, zstd 压缩)。以 event_json 为非空判断是旧形态；只要
+#   event_json 为 NULL 就必须解压 event_zstd，否则用量事件被整条丢弃。
 # Session JSONL: $OPENCLAW_STATE_DIR/agents/*/sessions/*.jsonl（旧版 token 用量）
 # 3：附上每条回复的端到端耗时。
-_OPENCLAW_PARSER_VERSION = 3
+# 4：读 event_zstd（zstd 压缩正文），不再静默丢压缩存储的用量事件。
+# 5：标准库优先，强制正文和窗口上限，并拒绝不完整或额外帧。
+_OPENCLAW_PARSER_VERSION = 5
 _OPENCLAW_LEDGER_VERSION = 2
 
 
@@ -10612,6 +10617,94 @@ def _scan_openclaw_db(db_path, sqlite_module):
         return task_days
     finally:
         conn.close()
+
+
+# Bound output independently of frame-declared size, and bound decoder windows.
+_OPENCLAW_MAX_EVENT_BYTES = 4 * 1024 * 1024
+_OPENCLAW_MAX_WINDOW_LOG = 22
+_OPENCLAW_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+_OPENCLAW_ZSTD_AVAILABLE = None
+
+
+def _openclaw_zstd_available():
+    """Probe existing stdlib/optional decoders once; never install dependencies."""
+    global _OPENCLAW_ZSTD_AVAILABLE
+    if _OPENCLAW_ZSTD_AVAILABLE is None:
+        try:
+            from compression import zstd  # noqa: F401
+        except Exception:
+            try:
+                import zstandard  # noqa: F401
+            except Exception:
+                _OPENCLAW_ZSTD_AVAILABLE = False
+            else:
+                _OPENCLAW_ZSTD_AVAILABLE = True
+        else:
+            _OPENCLAW_ZSTD_AVAILABLE = True
+    return _OPENCLAW_ZSTD_AVAILABLE
+
+
+def _openclaw_zstd_blob(value):
+    """解压 event_zstd 的 BLOB 正文，失败返回 None（调用方跳过该行）。"""
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        return None
+    data = bytes(value)
+    if not data or data[:4] != _OPENCLAW_ZSTD_MAGIC:
+        return None
+    if not _openclaw_zstd_available():
+        return None
+    try:
+        from compression import zstd
+    except Exception:
+        zstd = None
+    limit = _OPENCLAW_MAX_EVENT_BYTES
+    try:
+        if zstd is not None:
+            decoder = zstd.ZstdDecompressor(options={
+                zstd.DecompressionParameter.window_log_max:
+                    _OPENCLAW_MAX_WINDOW_LOG,
+            })
+            result = decoder.decompress(data, max_length=limit + 1)
+            if len(result) > limit or not decoder.eof or decoder.unused_data:
+                return None
+            return result
+
+        import io
+        import zstandard
+        parameters = zstandard.get_frame_parameters(data)
+        if parameters.window_size > 1 << _OPENCLAW_MAX_WINDOW_LOG:
+            return None
+        decoder = zstandard.ZstdDecompressor(max_window_size=limit)
+        # max_output_size alone can be ignored for known-size frames.
+        # Read across frames so even trailing output is covered by the budget.
+        with decoder.stream_reader(io.BytesIO(data),
+                                   read_across_frames=True) as reader:
+            result = reader.read(limit + 1)
+        if len(result) > limit:
+            return None
+        # A raw stream can stop on truncated input without raising. Only after
+        # its bounded pass establishes the output ceiling, validate one complete
+        # frame. Release the first output before this bounded second pass.
+        del result, decoder
+        validator = zstandard.ZstdDecompressor(
+            max_window_size=limit).decompressobj()
+        result = validator.decompress(data)
+        if len(result) > limit or not validator.eof or validator.unused_data:
+            return None
+        return result
+    except Exception:
+        return None
+
+
+def _openclaw_event_text(event_json, event_zstd):
+    """取事件正文（bytes）用于 json.loads。
+
+    两种存储互斥：优先 event_json，其次解压 event_zstd。均不可用时返回 None。
+    event_json 在 SQLite 里若存成 BLOB，json.loads 也能吃 bytes（且支持 UTF-8 BOM）。
+    """
+    if event_json is not None:
+        return event_json
+    return _openclaw_zstd_blob(event_zstd)
 
 
 def _openclaw_agent_db_paths(sqlite_module):
@@ -10777,8 +10870,15 @@ def _scan_openclaw_agent_db(db_path, sqlite_module):
         if "transcript_events" not in tables:
             raise sqlite_module.OperationalError("missing transcript_events")
         columns = {row[1] for row in conn.execute("PRAGMA table_info(transcript_events)")}
-        if not {"session_id", "seq", "event_json", "created_at"}.issubset(columns):
+        if not {"session_id", "seq", "created_at"}.issubset(columns):
             raise sqlite_module.OperationalError("incompatible transcript_events")
+        if "event_json" not in columns and "event_zstd" not in columns:
+            raise sqlite_module.OperationalError("incompatible transcript_events")
+
+        # 正文可能有三种列组合：旧库只有 event_json；压缩库两者都有；更早/更窄的
+        # 只读视图可能缺其中一列。SELECT 里始终保留两列名，用常量 NULL 占位。
+        json_expr = "event_json" if "event_json" in columns else "NULL"
+        zstd_expr = "event_zstd" if "event_zstd" in columns else "NULL"
 
         session_models = {}
         if "session_windows" in tables:
@@ -10792,9 +10892,12 @@ def _scan_openclaw_agent_db(db_path, sqlite_module):
 
         sessions = {}
         seen_events = {}
-        for session_id, seq, raw_event, created_at in conn.execute(
-                "SELECT session_id, seq, event_json, created_at "
+        for session_id, seq, raw_json, raw_zstd, created_at in conn.execute(
+                f"SELECT session_id, seq, {json_expr}, {zstd_expr}, created_at "
                 "FROM transcript_events ORDER BY session_id, seq"):
+            raw_event = _openclaw_event_text(raw_json, raw_zstd)
+            if raw_event is None:
+                continue
             try:
                 event = json.loads(raw_event)
             except (TypeError, ValueError):
@@ -10936,13 +11039,15 @@ def scan_openclaw(bounds, cache):
     # --- Part 2: dynamically discovered agent SQLite usage ---
     registry_ok, agent_db_paths = _openclaw_agent_db_paths(_sq)
     active_sqlite_keys = set()
+    zstd_available = _openclaw_zstd_available()
     for agent_db_path in agent_db_paths:
         entry_key = "sqlite:" + os.path.realpath(agent_db_path)
         active_sqlite_keys.add(entry_key)
         sig = _sqlite_signature(agent_db_path)
         entry = fc.get(entry_key)
         needs_scan = (not entry or entry.get("parser_version") != _OPENCLAW_PARSER_VERSION
-                      or entry.get("path") != agent_db_path or entry.get("sig") != sig)
+                      or entry.get("path") != agent_db_path or entry.get("sig") != sig
+                      or entry.get("zstd_available") != zstd_available)
         if sig and needs_scan:
             try:
                 sessions = _scan_openclaw_agent_db(agent_db_path, _sq)
@@ -10950,6 +11055,7 @@ def scan_openclaw(bounds, cache):
                 continue
             fc[entry_key] = {"source": "sqlite", "path": agent_db_path, "sig": sig,
                              "parser_version": _OPENCLAW_PARSER_VERSION,
+                             "zstd_available": zstd_available,
                              "sessions": sessions}
             changed = True
     if registry_ok:
