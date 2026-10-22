@@ -8,6 +8,7 @@ after(() => runtime.close());
 beforeEach(() => runtime.clear());
 const { CARDS } = await runtime.load("src/cards/registry.ts");
 const share = await runtime.load("src/lib/share.tsx");
+const i18n = await runtime.load("src/lib/i18n.ts");
 const context = (range) => ({
   usage: { copilot: { ranges: { today: range } } },
   range: "today", rangeLabel: "今日", refreshing: false, pref: (_key, fallback) => fallback,
@@ -70,9 +71,10 @@ test("premium-only Copilot activity renders metrics instead of an empty card", (
   assert.match(line.extra, /2.*Premium Requests/);
 });
 
-test("Copilot output-only label uses shared translations in cards, models and share lines", () => {
+test("Copilot output-only label uses shared translations in cards, models and share lines", async () => {
   for (const [lang, expected] of [["zh", "仅输出"], ["en", "Output only"], ["fr", "Sortie uniquement"], ["ja", "出力のみ"], ["ko", "출력만"]]) {
     runtime.pref("appLanguage", lang);
+    await i18n.prepareLanguage(lang);
     const ctx = context({ sessions: 1, out: 13, reason: 7, credits: 2, coverage: "output_only", models: [{ name: "model", out: 13, reason: 7 }] });
     const html = renderToStaticMarkup(card.render(ctx));
     assert.ok(html.split(expected).length >= 3, `${lang}: card and model coverage`);
