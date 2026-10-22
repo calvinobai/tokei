@@ -283,6 +283,7 @@ GROK_QUOTA_CACHE = _writable_path("grok_quota_cache.json")
 QWENWORK_QUOTA_CACHE = _writable_path("qwenwork_quota_cache.json")
 PROVIDER_QUOTA_CACHE = _writable_path("provider_quota_cache.json")
 ANTIGRAVITY_SCAN_CACHE = _writable_path("antigravity_scan_cache.json")
+ANTIGRAVITY_CREDENTIALS_CACHE = _writable_path("antigravity_credentials.json")
 
 # 每 1M token 美元单价。基准价来自 OpenRouter,外置在 pricing.json(由 --update-prices 同步);
 # pricing_overrides.json 做本地修正(write1h / 别名 / 缺漏),一键更新不覆盖它。
@@ -2724,6 +2725,9 @@ def _claude_usage(line, want_dt=False):
 # 接口(约 2880 次/天)。额度对应的是周窗口,变化很慢,拉长到 5 分钟没有感知差别。
 _CODEX_QUOTA_TTL = 300
 _CODEX_QUOTA_FALLBACK_TTL = 300
+# 额度耗尽、还没到重置时刻时放慢到每小时查一次。不直接睡到重置：
+# 官方提前重置、升级套餐、充值 Credits 都得靠这次复查才看得到。
+_QUOTA_EXHAUSTED_RECHECK_TTL = 3600
 _CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CODEX_USAGE_MAX_RESPONSE_BYTES = 256 * 1024
 _CODEX_RESET_CARDS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
@@ -2796,7 +2800,48 @@ def _codex_limits_have_active_window(limits, now_epoch=None):
     return False
 
 
-def _cached_codex_live_limits(max_age, allow_active_window=False, account_key=None):
+def _codex_limits_exhausted_reset_at(limits, now_epoch=None):
+    """额度耗尽且有未来的重置时刻时返回最早重置时间戳；未耗尽返回 None。
+
+    当 5h 窗口或周配额已用满 (used_percent >= 100) 时，在重置之前官方接口
+    并不会提前释放额度，期间每 5 分钟重复请求既毫无意义又容易招致 429。
+    有正额度 Credits 垫底时不视为耗尽。
+    任一窗口已过重置时刻也返回 None：那一格的读数已经失真，得去刷新。
+    """
+    if not isinstance(limits, dict):
+        return None
+    credits = limits.get("credits")
+    if isinstance(credits, dict) and credits.get("has_credits"):
+        try:
+            if float(credits.get("balance") or 0) > 0:
+                return None
+        except (TypeError, ValueError):
+            pass
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    exhausted_resets = []
+    future_resets = []
+    for slot_name in ("primary", "secondary"):
+        slot = limits.get(slot_name) or {}
+        used = slot.get("used_percent")
+        reset = slot.get("resets_at")
+        try:
+            if reset is None:
+                continue
+            reset_epoch = float(reset)
+            if reset_epoch <= now:
+                return None
+            future_resets.append(reset_epoch)
+            if used is not None and float(used) >= 100.0:
+                exhausted_resets.append(reset_epoch)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if not exhausted_resets and limits.get("rate_limit_reached_type"):
+        exhausted_resets = future_resets
+    return min(exhausted_resets) if exhausted_resets else None
+
+
+def _cached_codex_live_limits(max_age, allow_active_window=False, account_key=None,
+                              auth_key=None, now_epoch=None):
     cached = _load_json(CODEX_QUOTA_CACHE, {})
     fetched_at = cached.get("fetched_at")
     limits = cached.get("limits")
@@ -2805,13 +2850,19 @@ def _cached_codex_live_limits(max_age, allow_active_window=False, account_key=No
     cached_account_key = cached.get("account_key")
     if account_key and cached_account_key and cached_account_key != account_key:
         return None
+    cached_auth_key = cached.get("auth_key")
+    if auth_key and cached_auth_key and cached_auth_key != auth_key:
+        return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
     try:
         fetched_at = float(fetched_at)
     except (TypeError, ValueError, OverflowError):
         return None
-    age = datetime.now().timestamp() - fetched_at
+    age = now - fetched_at
+    if _codex_limits_exhausted_reset_at(limits, now_epoch=now) is not None:
+        max_age = max(max_age, _QUOTA_EXHAUSTED_RECHECK_TTL)
     if age > max_age and not (
-            allow_active_window and _codex_limits_have_active_window(limits)):
+            allow_active_window and _codex_limits_have_active_window(limits, now_epoch=now)):
         return None
     return limits, cached.get("plan"), fetched_at
 
@@ -2934,9 +2985,6 @@ def fetch_codex_live_limits():
         except Exception:
             pass
         return None
-    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL)
-    if cached:
-        return cached
     auth = _load_json(CODEX_AUTH, {})
     auth_context = _codex_auth_context(auth)
     access_token = auth_context.get("access_token")
@@ -2944,10 +2992,11 @@ def fetch_codex_live_limits():
     auth_key = auth_context.get("auth_key")
     if not access_token or not account_key:
         return None
-    cache_state = _load_json(CODEX_QUOTA_CACHE, {})
-    cached = _cached_codex_live_limits(_CODEX_QUOTA_TTL, account_key=account_key)
+    cached = _cached_codex_live_limits(
+        _CODEX_QUOTA_TTL, account_key=account_key, auth_key=auth_key)
     if cached:
         return cached
+    cache_state = _load_json(CODEX_QUOTA_CACHE, {})
     # 失败退避:网络不可达(如公司代理拦截)时 5 分钟内不再联网重试,
     # 否则每轮 30s 刷新都会白等约 6s 超时
     last_failure = cache_state.get("last_failure_at", 0)
@@ -5948,7 +5997,7 @@ def _scan_grok_billing_from_log(path=None, max_bytes=_GROK_QUOTA_LOG_SCAN_BYTES)
         latest["config"], plan=latest.get("plan"), source="log", updated=updated)
 
 
-def _cached_grok_quota(max_age):
+def _cached_grok_quota(max_age, now_epoch=None, exhausted_max_age=None):
     cached = _load_json(GROK_QUOTA_CACHE, {})
     if not isinstance(cached, dict):
         return None
@@ -5956,10 +6005,21 @@ def _cached_grok_quota(max_age):
     fetched_at = cached.get("fetched_at")
     if not isinstance(quota, dict) or fetched_at is None:
         return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
     try:
-        age = datetime.now().timestamp() - float(fetched_at)
+        fetched_at = float(fetched_at)
     except (TypeError, ValueError):
         return None
+    pct = quota.get("pct")
+    reset = quota.get("reset")
+    try:
+        # 只有实时查询的入口传 exhausted_max_age；本地兜底路径保持原来的时效。
+        if (exhausted_max_age is not None and pct is not None
+                and float(pct) >= 100.0 and reset is not None and float(reset) > now):
+            max_age = max(max_age, exhausted_max_age)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    age = now - fetched_at
     if age > max_age:
         return None
     out = dict(quota)
@@ -5989,7 +6049,8 @@ def fetch_grok_live_quota():
     """仅在用户开启时请求 Grok billing API;失败回退到短缓存。"""
     if not _grok_live_quota_enabled():
         return None
-    cached = _cached_grok_quota(_GROK_QUOTA_TTL)
+    cached = _cached_grok_quota(
+        _GROK_QUOTA_TTL, exhausted_max_age=_QUOTA_EXHAUSTED_RECHECK_TTL)
     if cached and cached.get("source") == "live":
         return cached
     token, expired = _grok_auth_state()
@@ -6657,6 +6718,25 @@ def _provider_credential_marker(provider, *parts):
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def _provider_quota_exhausted_reset_at(quota, now_epoch=None):
+    """Return the earliest exhausted reset while all known windows remain active."""
+    if not isinstance(quota, dict):
+        return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    exhausted_resets = []
+    for window in quota.get("windows") or []:
+        if not isinstance(window, dict):
+            continue
+        used = _provider_number(window.get("used_pct"))
+        reset_epoch = _provider_number(window.get("reset"))
+        # Another window may reset before the exhausted window does.
+        if reset_epoch is not None and reset_epoch <= now:
+            return None
+        if used is not None and used >= 100.0 and reset_epoch is not None:
+            exhausted_resets.append(reset_epoch)
+    return min(exhausted_resets) if exhausted_resets else None
+
+
 def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=False):
     with _PROVIDER_QUOTA_CACHE_LOCK:
         root = _load_json(PROVIDER_QUOTA_CACHE, {})
@@ -6669,7 +6749,13 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     if fetched_at is None or not isinstance(quota, dict):
         return None
     age = now_epoch - int(fetched_at)
-    if age < -300 or age > max_age:
+    if age < -300:
+        return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    # Exhaustion slows polling, but recheck at least hourly for changed limits.
+    if max_age is not None and exhausted_until is not None and age < 3600:
+        max_age = max(max_age, 3600)
+    if max_age is not None and age > max_age:
         return None
     out = json.loads(json.dumps(quota))
     if stale:
@@ -6691,7 +6777,13 @@ def _latest_cached_provider_quota(provider, max_age=None, now_epoch=None, stale=
     if fetched_at is None or not isinstance(quota, dict):
         return None
     age = now_epoch - int(fetched_at)
-    if age < -300 or (max_age is not None and age > max_age):
+    if age < -300:
+        return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    # Exhaustion slows polling, but recheck at least hourly for changed limits.
+    if max_age is not None and exhausted_until is not None and age < 3600:
+        max_age = max(max_age, 3600)
+    if max_age is not None and age > max_age:
         return None
     out = json.loads(json.dumps(quota))
     if stale:
@@ -6775,6 +6867,7 @@ def _save_provider_quota_attempt(provider, marker, attempted_at=None, result="fa
 def _provider_json_request(url, *, headers=None, method="GET", body=None, timeout=5,
                            max_bytes=_PROVIDER_QUOTA_MAX_RESPONSE_BYTES,
                            allow_insecure_loopback_tls=False):
+    import ipaddress
     import ssl
     import urllib.error
     import urllib.request
@@ -6798,6 +6891,13 @@ def _provider_json_request(url, *, headers=None, method="GET", body=None, timeou
             return None
 
     handlers = [NoRedirect()]
+    # Local capability headers must never be routed through environment/system proxies.
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        loopback = parsed.hostname == "localhost"
+    if loopback:
+        handlers.append(urllib.request.ProxyHandler({}))
     if context is not None:
         handlers.append(urllib.request.HTTPSHandler(context=context))
     opener = urllib.request.build_opener(*handlers)
@@ -8492,6 +8592,172 @@ def _windows_powershell(script, timeout=10):
     return result.stdout.decode("utf-8", errors="replace")
 
 
+def _antigravity_proc_env(pid):
+    """读取指定进程的环境变量字典（支持 macOS 与 Linux）。"""
+    if not pid or pid <= 0:
+        return {}
+    if not _IS_WINDOWS and sys.platform == "darwin":
+        try:
+            import ctypes, ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN = 1, KERN_PROCARGS2 = 49
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                return {}
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                return {}
+            raw = buf.raw
+            if len(raw) < 8:
+                return {}
+            argc = int.from_bytes(raw[:4], byteorder="little")
+            pos = 4
+            end = raw.find(b"\0", pos)
+            if end == -1:
+                return {}
+            pos = end
+            while pos < len(raw) and raw[pos] == 0:
+                pos += 1
+            for _ in range(argc):
+                end = raw.find(b"\0", pos)
+                if end == -1:
+                    break
+                pos = end + 1
+            env = {}
+            while pos < len(raw):
+                end = raw.find(b"\0", pos)
+                if end == -1:
+                    break
+                entry = raw[pos:end]
+                if entry:
+                    try:
+                        line = entry.decode("utf-8", "ignore")
+                        if "=" in line:
+                            k, v = line.split("=", 1)
+                            env[k] = v
+                    except Exception:
+                        pass
+                pos = end + 1
+            return env
+        except Exception:
+            return {}
+    elif not _IS_WINDOWS and sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{int(pid)}/environ", "rb") as f:
+                raw = f.read()
+            env = {}
+            for entry in raw.split(b"\0"):
+                if not entry:
+                    continue
+                try:
+                    line = entry.decode("utf-8", "ignore")
+                    if "=" in line:
+                        k, v = line.split("=", 1)
+                        env[k] = v
+                except Exception:
+                    pass
+            return env
+        except Exception:
+            return {}
+    return {}
+
+
+def _discover_antigravity_credentials(processes=None):
+    """发现并缓存 Antigravity 的 CSRF Token 与服务端口。"""
+    # 1. 优先读取系统环境变量 (如由 agy 子进程或当前终端环境启动)
+    token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN")
+    addr = os.environ.get("ANTIGRAVITY_LS_ADDRESS")
+    if token:
+        port = _provider_integer(addr.split(":")[-1]) if addr and ":" in addr else None
+        return {p["pid"]: (token, port) for p in (processes or [])} or {0: (token, port)}
+
+    # 2. 读取持久化凭据缓存
+    cached_root = _load_json(ANTIGRAVITY_CREDENTIALS_CACHE, {})
+    cached_creds = cached_root.get("credentials") if isinstance(cached_root, dict) and isinstance(cached_root.get("credentials"), dict) else {}
+
+    discovered = {}
+    missing_procs = []
+    for proc in (processes or []):
+        pid_str = str(proc.get("pid"))
+        if pid_str in cached_creds:
+            c = cached_creds[pid_str]
+            if isinstance(c, dict) and c.get("token"):
+                discovered[proc["pid"]] = (c.get("token"), c.get("port"))
+                continue
+        missing_procs.append(proc)
+
+    # 3. 检查进程自身环境 (针对 cli 进程)
+    for proc in missing_procs:
+        env = _antigravity_proc_env(proc.get("pid"))
+        t = env.get("ANTIGRAVITY_CSRF_TOKEN")
+        a = env.get("ANTIGRAVITY_LS_ADDRESS")
+        if t:
+            port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+            discovered[proc["pid"]] = (t, port)
+
+    # 4. 如果还有进程未找到 CSRF token，扫描当前系统上运行的进程环境
+    needed = [p for p in (processes or []) if p["pid"] not in discovered]
+    if needed and not _IS_WINDOWS and sys.platform == "darwin":
+        try:
+            import ctypes, ctypes.util
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            out = subprocess.run(["/bin/ps", "-ax", "-o", "pid="],
+                                 capture_output=True, text=True, timeout=2, check=False).stdout
+            pids = [int(p) for p in out.split() if p.isdigit()]
+            for p in pids:
+                mib = (ctypes.c_int * 3)(1, 49, p)
+                size = ctypes.c_size_t(0)
+                if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                    continue
+                buf = ctypes.create_string_buffer(size.value)
+                if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+                    continue
+                raw = buf.raw
+                if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
+                    continue
+                t, a = None, None
+                for part in raw.split(b"\0"):
+                    if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                        t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                    elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
+                        a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                if t:
+                    port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+                    for proc in needed:
+                        discovered[proc["pid"]] = (t, port)
+                    discovered[0] = (t, port)
+                    break
+        except Exception:
+            pass
+    elif needed and not _IS_WINDOWS and sys.platform.startswith("linux"):
+        try:
+            import glob
+            for env_path in glob.glob("/proc/[0-9]*/environ"):
+                try:
+                    with open(env_path, "rb") as f:
+                        raw = f.read()
+                    if b"ANTIGRAVITY_CSRF_TOKEN=" not in raw:
+                        continue
+                    t, a = None, None
+                    for part in raw.split(b"\0"):
+                        if part.startswith(b"ANTIGRAVITY_CSRF_TOKEN="):
+                            t = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                        elif part.startswith(b"ANTIGRAVITY_LS_ADDRESS="):
+                            a = part.split(b"=", 1)[1].decode("utf-8", "ignore")
+                    if t:
+                        port = _provider_integer(a.split(":")[-1]) if a and ":" in a else None
+                        for proc in needed:
+                            discovered[proc["pid"]] = (t, port)
+                        discovered[0] = (t, port)
+                        break
+                except (OSError, IOError):
+                    continue
+        except Exception:
+            pass
+
+    return discovered
+
+
 def _antigravity_running_processes(now_epoch=None):
     if _antigravity_scan_recently_empty(now_epoch):
         return []
@@ -8508,6 +8774,28 @@ def _antigravity_running_processes(now_epoch=None):
         except (OSError, subprocess.SubprocessError):
             return []
     processes = _antigravity_process_infos(output)
+    if processes:
+        discovered = _discover_antigravity_credentials(processes)
+        credentials_to_save = {}
+        for proc in processes:
+            token, port = discovered.get(proc["pid"], discovered.get(0, (None, None)))
+            if token and not proc.get("csrf_token"):
+                proc["csrf_token"] = token
+            if port and not proc.get("ls_port"):
+                proc["ls_port"] = port
+            if proc.get("csrf_token"):
+                credentials_to_save[str(proc["pid"])] = {
+                    "token": proc["csrf_token"],
+                    "port": proc.get("ls_port"),
+                }
+        if credentials_to_save:
+            try:
+                _atomic_write_json(ANTIGRAVITY_CREDENTIALS_CACHE, {
+                    "credentials": credentials_to_save,
+                    "updated": int(now_epoch if now_epoch is not None else datetime.now().timestamp()),
+                })
+            except OSError:
+                pass
     _record_antigravity_scan(bool(processes), now_epoch)
     return processes
 
@@ -8533,14 +8821,20 @@ def _antigravity_listening_ports(pid):
 
 def _antigravity_endpoints(process):
     endpoints = []
+    csrf = process.get("csrf_token") or ""
+    requires_csrf = bool(csrf)
     extension_port = process.get("extension_port")
     if extension_port:
-        for token in (process.get("extension_csrf_token"), process.get("csrf_token")):
+        for token in (process.get("extension_csrf_token"), csrf):
             if token is not None:
                 endpoints.append(("http", extension_port, token, True))
-    for port in _antigravity_listening_ports(process["pid"]):
-        endpoints.append(("https", port, process.get("csrf_token") or "",
-                          process.get("kind") != "cli"))
+    ports = list(_antigravity_listening_ports(process["pid"]))
+    ls_port = process.get("ls_port")
+    if ls_port and ls_port not in ports:
+        ports.insert(0, ls_port)
+    for port in ports:
+        endpoints.append(("http", port, csrf, requires_csrf))
+        endpoints.append(("https", port, csrf, requires_csrf))
     unique = []
     for endpoint in endpoints:
         if endpoint not in unique:
@@ -8550,8 +8844,11 @@ def _antigravity_endpoints(process):
 
 def _antigravity_request(endpoint, path, body):
     scheme, port, csrf, requires_csrf = endpoint
-    headers = {"Connect-Protocol-Version": "1"}
-    if requires_csrf:
+    headers = {
+        "Connect-Protocol-Version": "1",
+        "Content-Type": "application/json",
+    }
+    if requires_csrf and csrf:
         headers["X-Codeium-Csrf-Token"] = csrf
     return _provider_json_request(
         f"{scheme}://127.0.0.1:{port}{path}", headers=headers, method="POST", body=body,
@@ -8686,6 +8983,10 @@ def fetch_antigravity_quota():
         if fallback:
             return fallback
     if last_error:
+        try:
+            os.remove(ANTIGRAVITY_CREDENTIALS_CACHE)
+        except OSError:
+            pass
         raise last_error
     return {}
 
@@ -13644,7 +13945,33 @@ def _kimi_limits_have_active_window(limits, now_epoch=None):
     return False
 
 
-def _cached_kimi_live_limits(max_age, auth_key, allow_active_window=False):
+def _kimi_limits_exhausted_reset_at(limits, now_epoch=None):
+    """Kimi 额度耗尽且有未来的重置时刻时返回最早重置时间戳；未耗尽返回 None。
+
+    任一窗口已过重置时刻也返回 None：那一格的读数已经失真，得去刷新。
+    """
+    if not isinstance(limits, dict):
+        return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
+    exhausted_resets = []
+    for slot_key in ("five_hour", "subscription"):
+        slot = (limits or {}).get(slot_key) or {}
+        used = slot.get("used_percent")
+        reset = slot.get("resets_at")
+        try:
+            if reset is None:
+                continue
+            reset_epoch = float(reset)
+            if reset_epoch <= now:
+                return None
+            if used is not None and float(used) >= 100.0:
+                exhausted_resets.append(reset_epoch)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    return min(exhausted_resets) if exhausted_resets else None
+
+
+def _cached_kimi_live_limits(max_age, auth_key, allow_active_window=False, now_epoch=None):
     cached = _load_json(KIMI_QUOTA_CACHE, {})
     if not auth_key or cached.get("auth_key") != auth_key:
         return None
@@ -13652,13 +13979,16 @@ def _cached_kimi_live_limits(max_age, auth_key, allow_active_window=False):
     limits = cached.get("limits")
     if not fetched_at or not limits:
         return None
+    now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
     try:
         fetched_at = float(fetched_at)
     except (TypeError, ValueError, OverflowError):
         return None
-    age = datetime.now().timestamp() - fetched_at
+    age = now - fetched_at
+    if _kimi_limits_exhausted_reset_at(limits, now_epoch=now) is not None:
+        max_age = max(max_age, _QUOTA_EXHAUSTED_RECHECK_TTL)
     if age > max_age and not (
-            allow_active_window and _kimi_limits_have_active_window(limits)):
+            allow_active_window and _kimi_limits_have_active_window(limits, now_epoch=now)):
         return None
     return limits, cached.get("plan"), fetched_at
 
