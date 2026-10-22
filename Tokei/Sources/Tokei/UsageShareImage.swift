@@ -124,6 +124,10 @@ enum UsageShareImage {
         case "Claude Code": return Theme.claude
         case "Codex", "Luna Reserve": return Theme.codex
         case "Gemini": return Theme.gemini
+        case "Cursor": return Theme.cursor
+        case "z.ai", "z.ai / GLM": return Theme.zai
+        case "Zed": return Theme.zed
+        case "Sub2API": return Theme.sub2api
         case "Grok": return Theme.grok
         case "Grok Bot": return Theme.grokBot
         case "Qoder Desktop": return Theme.qoder
@@ -197,6 +201,12 @@ struct UsageShareOverviewView: View {
                 CostHeadline(
                     value: Fmt.human(totals.tokens),
                     caption: L("%@ 总量", range.label),
+                    tint: Theme.claude
+                )
+            } else if totals.calls > 0 {
+                CostHeadline(
+                    value: Fmt.human(totals.calls),
+                    caption: L("%@ 响应", range.label),
                     tint: Theme.claude
                 )
             }
@@ -347,6 +357,8 @@ private func nativeToolCard(
 
         if let tokens = line.tokens, tokens > 0 {
             CostHeadline(value: Fmt.human(tokens), caption: line.id == "copilot" ? L("仅输出") : L("%@ 总量", rangeLabel), tint: tint)
+        } else if let calls = line.calls, calls > 0 {
+            CostHeadline(value: Fmt.human(calls), caption: L("%@ 响应", rangeLabel), tint: tint)
         }
 
         LazyVGrid(
@@ -383,6 +395,15 @@ private func nativeToolCard(
             }
             if let calls = line.calls, calls > 0 {
                 MetricCell(icon: "waveform", label: L("调用"), value: "\(calls)", tint: tint)
+            }
+            if let extra = line.extra, !extra.isEmpty {
+                if extra.contains("Credits") {
+                    MetricCell(icon: "sparkles", label: L("额度"), value: extra, tint: tint)
+                } else if extra.contains("消息") { // l10n-ignore
+                    MetricCell(icon: "bubble.left", label: L("消息数"), value: extra, tint: tint)
+                } else {
+                    MetricCell(icon: "info.circle", label: L("信息"), value: extra, tint: tint)
+                }
             }
         }
     }

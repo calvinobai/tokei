@@ -78,6 +78,7 @@ test("Copilot output-only label uses shared translations in cards, models and sh
     assert.ok(html.split(expected).length >= 3, `${lang}: card and model coverage`);
     const line = share.shareToolLines(ctx.usage, "today", share.currentShareVisibility()).find(line => line.id === "copilot");
     assert.ok(line.extra.startsWith(expected));
+    assert.equal(share.shareLineHeadline(line, "today").caption, expected);
     assert.ok(share.shareLineCells(line, card.tint).some(cell => cell.label === "Premium Requests" && cell.value === "2"));
   }
 });
