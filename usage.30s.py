@@ -6659,7 +6659,7 @@ def _provider_credential_marker(provider, *parts):
 
 
 def _provider_quota_exhausted_reset_at(quota, now_epoch=None):
-    """当任一窗口用量满 (used_pct >= 100) 且有未来的 reset 时返回最早重置时间戳。"""
+    """Return the earliest exhausted reset while all known windows remain active."""
     if not isinstance(quota, dict):
         return None
     now = float(now_epoch if now_epoch is not None else datetime.now().timestamp())
@@ -6667,15 +6667,13 @@ def _provider_quota_exhausted_reset_at(quota, now_epoch=None):
     for window in quota.get("windows") or []:
         if not isinstance(window, dict):
             continue
-        used = window.get("used_pct")
-        reset = window.get("reset")
-        try:
-            if used is not None and float(used) >= 100.0 and reset is not None:
-                reset_epoch = float(reset)
-                if reset_epoch > now:
-                    exhausted_resets.append(reset_epoch)
-        except (TypeError, ValueError, OverflowError):
-            continue
+        used = _provider_number(window.get("used_pct"))
+        reset_epoch = _provider_number(window.get("reset"))
+        # Another window may reset before the exhausted window does.
+        if reset_epoch is not None and reset_epoch <= now:
+            return None
+        if used is not None and used >= 100.0 and reset_epoch is not None:
+            exhausted_resets.append(reset_epoch)
     return min(exhausted_resets) if exhausted_resets else None
 
 
@@ -6690,15 +6688,14 @@ def _cached_provider_quota(provider, marker, max_age, now_epoch=None, stale=Fals
     now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
     if fetched_at is None or not isinstance(quota, dict):
         return None
-    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
-    if exhausted_until is not None and now_epoch < exhausted_until:
-        out = json.loads(json.dumps(quota))
-        if stale:
-            out["stale"] = True
-            out["source"] = "cache"
-        return out
     age = now_epoch - int(fetched_at)
-    if age < -300 or age > max_age:
+    if age < -300:
+        return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    # Exhaustion slows polling, but recheck at least hourly for changed limits.
+    if max_age is not None and exhausted_until is not None and age < 3600:
+        max_age = max(max_age, 3600)
+    if max_age is not None and age > max_age:
         return None
     out = json.loads(json.dumps(quota))
     if stale:
@@ -6719,15 +6716,14 @@ def _latest_cached_provider_quota(provider, max_age=None, now_epoch=None, stale=
     now_epoch = int(now_epoch if now_epoch is not None else datetime.now().timestamp())
     if fetched_at is None or not isinstance(quota, dict):
         return None
-    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
-    if exhausted_until is not None and now_epoch < exhausted_until:
-        out = json.loads(json.dumps(quota))
-        if stale:
-            out["stale"] = True
-            out["source"] = "cache"
-        return out
     age = now_epoch - int(fetched_at)
-    if age < -300 or (max_age is not None and age > max_age):
+    if age < -300:
+        return None
+    exhausted_until = _provider_quota_exhausted_reset_at(quota, now_epoch=now_epoch)
+    # Exhaustion slows polling, but recheck at least hourly for changed limits.
+    if max_age is not None and exhausted_until is not None and age < 3600:
+        max_age = max(max_age, 3600)
+    if max_age is not None and age > max_age:
         return None
     out = json.loads(json.dumps(quota))
     if stale:
@@ -6811,6 +6807,7 @@ def _save_provider_quota_attempt(provider, marker, attempted_at=None, result="fa
 def _provider_json_request(url, *, headers=None, method="GET", body=None, timeout=5,
                            max_bytes=_PROVIDER_QUOTA_MAX_RESPONSE_BYTES,
                            allow_insecure_loopback_tls=False):
+    import ipaddress
     import ssl
     import urllib.error
     import urllib.request
@@ -6834,6 +6831,13 @@ def _provider_json_request(url, *, headers=None, method="GET", body=None, timeou
             return None
 
     handlers = [NoRedirect()]
+    # Local capability headers must never be routed through environment/system proxies.
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        loopback = parsed.hostname == "localhost"
+    if loopback:
+        handlers.append(urllib.request.ProxyHandler({}))
     if context is not None:
         handlers.append(urllib.request.HTTPSHandler(context=context))
     opener = urllib.request.build_opener(*handlers)
