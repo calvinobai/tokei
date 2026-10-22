@@ -44,7 +44,8 @@ struct LocalOutputThroughputCheck {
         try expect(counters["openclaw"] == 100 && counters["musecode"] == 100, "inclusive reasoning is not doubled")
         try expect(counters["gemini"] == 120 && counters["opencode"] == 130 && counters["deepseek_harness"] == 130,
                    "separate reasoning contributes once")
-        try expect(counters.count == 26, "all 25 local tools plus reserve are included")
+        try expect(counters["copilot"] == 20, "Copilot normalized output and reasoning contribute once")
+        try expect(counters.count == 27, "all 26 local tools plus reserve are included")
         try expect(counters["cursor"] == nil && counters["grok_bot"] == nil && counters["sub2api"] == nil,
                    "account-wide provider totals excluded")
         print("local output throughput checks passed")

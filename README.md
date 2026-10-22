@@ -59,6 +59,7 @@ Tokei 是一款 **macOS 菜单栏应用**，实时追踪 20+ 款 AI 编程工具
 | **Kimi Code** | Token（输入/输出/缓存）、会话、模型、项目、配额（5h / 订阅周期） |
 | **Muse Code** | Token（输入/输出/缓存/推理）、成本、模型、项目 |
 | **Command Code** | Token（输入/输出/缓存）、成本、模型、项目 |
+| **GitHub Copilot** | 已核实输出（含推理，Output only）、Premium Requests、会话、模型、项目（本地日志） |
 | **Devin** | Token（输入/输出/缓存）、成本、模型、会话；日/周/消息额度、套餐与账号、超额余额 |
 | **MiniMax Code** | Token（输入/输出/缓存）、成本、模型、会话、项目；可选 Token Plan 5 小时 / 周额度（填入 Key 后联网查询） |
 
@@ -217,7 +218,7 @@ chmod +x ~/.tokei/tokei-sync.sh
 | Grok Build | `${GROK_HOME:-~/.grok}/logs/unified.jsonl`（含真实 token + billing 额度）+ `sessions/*/*/{summary,signals}.json`；可选实时账单接口（设置里默认关闭） |
 | Grok Bot | `~/Library/Application Support/Grok Bot/sand-client-persistence/*.blob`（本地活动）；可选 Sand 官方 usage-events / 额度接口（首次需授权 Grok Bot 钥匙串，设置里默认关闭） |
 | Hermes | `~/.hermes/state.db` + `~/.hermes/profiles/*/state.db` |
-| OpenClaw | `~/.openclaw/state/openclaw.sqlite` 动态发现 agent SQLite；兼容旧版 `agents/*/sessions/*.jsonl` |
+| OpenClaw | `~/.openclaw/state/openclaw.sqlite` 动态发现 agent SQLite；`transcript_events` 正文兼容 `event_json` 与 `event_zstd`（Python 3.14+ 标准库或已安装的 zstandard 解码）两种存储；兼容旧版 `agents/*/sessions/*.jsonl` |
 | Pi Coding Agent CLI | `~/.pi/agent/sessions/<project>/*.jsonl` |
 | Prime Agent | `~/.prime/agent/sessions/*.jsonl` + `session-artifacts/**/**/*.jsonl` |
 | WorkBuddy | `~/.workbuddy/projects/<project>/*.jsonl` |
@@ -415,3 +416,14 @@ For full documentation, visit [tokei.lanshuagent.com](https://tokei.lanshuagent.
 ## License
 
 MIT
+
+### GitHub Copilot 计量覆盖
+
+Copilot 目前只统计可核实的输出（含推理），卡片、概览和分享标注 **Output only**。
+推理是原始输出的子集，规范化为非推理输出 `out = rawOutput - min(rawOutput, rawReason)`，推理独立存储，已知总量 `out + reason` 只计算一次。
+Premium Requests 独立展示，不推测剩余额度。输入、缓存读/写及完整 API 成本暂缓展示或计入总量；原始数字只作为本地缓存元数据保留。
+输入/缓存包含关系仍待 runtime owner 确认，见 [SDK issue #2834](https://github.com/github/copilot-sdk/issues/2834) 和 [SDK PR #2837](https://github.com/github/copilot-sdk/pull/2837)。
+reasoning 子集定义见 [官方 assistant.usage 文档](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events#assistantusage)。模型、项目和账本也采用相同已知输出口径。
+
+Copilot 同时发现 SQLite 与 JSONL 时，数据库有效用量行的全部会话 ID 优先；JSONL 只补充数据库未覆盖的会话。
+物理路径会解析符号链接去重；不按时间或 token 相等推测来源重叠。数据库已覆盖的会话不会另外叠加 JSONL 用量或 Premium Requests。

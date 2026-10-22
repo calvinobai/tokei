@@ -84,6 +84,7 @@ extension Usage {
             ("opencode", opencode.ranges), ("qwencode", qwencode.ranges),
             ("kimicode", kimicode.ranges), ("cmdcode", cmdcode.ranges),
             ("devin", devin.ranges), ("minimax", minimax.ranges),
+            ("copilot", copilot.ranges),
         ]
         for (id, ranges) in tokenTools {
             let range = ranges.get(.all)

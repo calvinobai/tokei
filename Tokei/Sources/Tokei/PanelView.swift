@@ -88,6 +88,7 @@ struct PanelView: View {
     @AppStorage("showKimiCode") private var showKimiCode = true
     @AppStorage("showMuseCode") private var showMuseCode = true
     @AppStorage("showCmdCode") private var showCmdCode = true
+    @AppStorage("showCopilot") private var showCopilot = true
     @AppStorage("showDevin") private var showDevin = true
     @AppStorage("showMiniMax") private var showMiniMax = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
@@ -114,7 +115,9 @@ struct PanelView: View {
 
     private var toolVisibility: UsageToolVisibility {
         UsageToolVisibility(
-            claude: showClaude, codex: showCodex, gemini: showGemini, grok: showGrok,
+            claude: showClaude, codex: showCodex, gemini: showGemini,
+            cursor: showCursor, zed: showZed, sub2api: showSub2API, zai: showZai,
+            grok: showGrok,
             grokBot: showGrokBot,
             qoder: showQoder, qoderwork: showQoderWork, qodercli: showQoderCli,
             qodercliCN: showQoderCliCN,
@@ -124,7 +127,7 @@ struct PanelView: View {
             codebuddy: showCodeBuddy,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
-            musecode: showMuseCode, cmdcode: showCmdCode,
+            musecode: showMuseCode, cmdcode: showCmdCode, copilot: showCopilot,
             devin: showDevin, minimax: showMiniMax
         )
     }
@@ -136,7 +139,7 @@ struct PanelView: View {
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent, showDevin,
+         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showCopilot, showPrimeAgent, showDevin,
          showMiniMax].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
@@ -436,6 +439,7 @@ struct PanelView: View {
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         let mcr = u.musecode.ranges.get(sel), ccr = u.cmdcode.ranges.get(sel)
+        let cpr = u.copilot.ranges.get(sel)
         let dvr = u.devin.ranges.get(sel), mmr = u.minimax.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
@@ -458,6 +462,7 @@ struct PanelView: View {
                          content: AnyView(providerQuotaBlock(
                             "Cursor", quota: u.cursor, usage: cursorUsage,
                             modelsOpen: $cursorModelsOpen, tint: Theme.cursor,
+                            toolID: "cursor",
                             setupHint: L("请确认 Cursor.app 已登录；Tokei 会复用其本地登录态读取额度。")))),
             ToolCardItem(id: "zed", name: "Zed", visible: showZed, active: showZed,
                          tint: Theme.zed, presentation: .compactStatus,
@@ -476,6 +481,7 @@ struct PanelView: View {
                          content: AnyView(providerQuotaBlock(
                             "z.ai / GLM", quota: u.zai, usage: zaiUsage,
                             modelsOpen: $zaiModelsOpen, tint: Theme.zai,
+                            toolID: "zai",
                             setupHint: L("请在设置的「Provider 额度」中选择区域并保存 API Key。")))),
             ToolCardItem(id: "grok", name: "Grok", visible: showGrok,
                          active: kr.sessions > 0 || kr.usage_calls > 0 || u.grok.pct != nil,
@@ -574,6 +580,10 @@ struct PanelView: View {
                          tint: Theme.musecode, content: AnyView(tokenUsageBlock(title: "Muse Code", mcr, tint: Theme.musecode, modelsOpen: $museCodeModelsOpen, reasonIncludedInOutput: true, toolID: "musecode"))),
             ToolCardItem(id: "cmdcode", name: "Command Code", visible: showCmdCode, active: ccr.sessions > 0,
                          tint: Theme.cmdcode, content: AnyView(tokenUsageBlock(title: "Command Code", ccr, tint: Theme.cmdcode, modelsOpen: $cmdCodeModelsOpen, toolID: "cmdcode"))),
+            ToolCardItem(id: "copilot", name: "GitHub Copilot", visible: showCopilot,
+                         active: cpr.sessions > 0 || cpr.credits > 0,
+                         tint: Theme.copilot,
+                         content: AnyView(copilotOutputBlock(cpr))),
         ]
     }
 
@@ -1002,14 +1012,16 @@ struct PanelView: View {
         usage: TokenUsageRange? = nil,
         modelsOpen: Binding<Bool>? = nil,
         tint: Color,
+        toolID: String? = nil,
+        range: RangeKey? = nil,
         setupHint: String
     ) -> some View {
-        let range = usage ?? TokenUsageRange()
-        let hasUsage = range.totalTokens > 0 || range.requests > 0
+        let rangeData = usage ?? TokenUsageRange()
+        let hasUsage = rangeData.totalTokens > 0 || rangeData.requests > 0
         VStack(alignment: .leading, spacing: 11) {
-            cardHeadPlain(title, tint: tint)
+            cardHeadPlain(title, tint: tint, toolID: hasUsage ? toolID : nil, range: range)
             if hasUsage {
-                providerTokenUsageContent(range, modelsOpen: modelsOpen, tint: tint)
+                providerTokenUsageContent(rangeData, modelsOpen: modelsOpen, tint: tint)
             }
             if quota.available {
                 if hasUsage { thinDivider }
@@ -1183,8 +1195,10 @@ struct PanelView: View {
         let hasActivity = r.sessions > 0 || r.calls > 0 || r.turns > 0
         let hasUsage = usage.totalTokens > 0 || usage.requests > 0
         VStack(alignment: .leading, spacing: 11) {
-            cardHead("Grok Bot", tint: Theme.grokBot, sessions: r.sessions,
-                     toolID: hasActivity && displayedRange == sel ? "grok-bot" : nil)
+            cardHead("Grok Bot", tint: Theme.grokBot,
+                     sessions: r.sessions > 0 ? r.sessions : usage.sessions,
+                     toolID: (hasActivity || hasUsage) ? "grok-bot" : nil,
+                     range: displayedRange)
             if hasUsage {
                 if displayedRange != sel {
                     Text(L("%@暂无活动，显示%@最近记录", sel.label, displayedRange.label))
@@ -1888,6 +1902,26 @@ struct PanelView: View {
 
     // MARK: - Token usage cards
     @ViewBuilder
+    func copilotOutputBlock(_ r: TokenUsageRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("GitHub Copilot", tint: Theme.copilot, sessions: r.sessions, toolID: "copilot")
+            if r.sessions > 0 || r.out + r.reason > 0 || r.credits > 0 {
+                CostHeadline(value: Fmt.human(r.out + r.reason), caption: "\(sel.label) · \(L("仅输出"))", tint: Theme.copilot)
+                let premium: [Metric] = r.credits > 0
+                    ? [.init("circle.hexagongrid.fill", "Premium Requests", Fmt.credits(r.credits))] : []
+                metricGrid([], hit: 0, extra: premium + [
+                    .init("arrow.up", L("输出"), Fmt.human(r.out)),
+                    .init("brain", L("推理"), Fmt.human(r.reason))
+                ], tint: Theme.copilot)
+                ForEach(r.models) { model in
+                    Text("\(L10n.data(model.name)) · \(L("仅输出")): \(Fmt.human(model.out + model.reason)) (\(L("输出")) \(Fmt.human(model.out)) · \(L("推理")) \(Fmt.human(model.reason)))")
+                        .font(.system(size: Theme.fontSize(10)))
+                        .foregroundStyle(Theme.tSecondary)
+                }
+            } else { emptyHint }
+        }
+    }
+
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
                          showsCost: Bool = true, showsCredits: Bool = false,
@@ -2127,7 +2161,7 @@ struct PanelView: View {
         return denom > 0 ? Double(m.cr) / Double(denom) * 100 : 0
     }
 
-    func cardHead(_ title: String, tint: Color, sessions: Int = 0, toolID: String? = nil) -> some View {
+    func cardHead(_ title: String, tint: Color, sessions: Int = 0, toolID: String? = nil, range: RangeKey? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
@@ -2141,29 +2175,29 @@ struct PanelView: View {
             }
             Spacer()
             if let toolID {
-                cardCopyButton(toolID: toolID, tint: tint)
+                cardCopyButton(toolID: toolID, tint: tint, range: range)
             }
         }
     }
 
     // 无命中环的卡头(Grok 无缓存命中数据)。
-    func cardHeadPlain(_ title: String, tint: Color, toolID: String? = nil) -> some View {
+    func cardHeadPlain(_ title: String, tint: Color, toolID: String? = nil, range: RangeKey? = nil) -> some View {
         HStack(spacing: 7) {
             Circle().fill(tint.gradient).frame(width: 8, height: 8)
                 .shadow(color: tint.opacity(0.6), radius: 3)
             Text(title).font(.system(size: Theme.fontSize(14), weight: .bold))
             Spacer()
             if let toolID {
-                cardCopyButton(toolID: toolID, tint: tint)
+                cardCopyButton(toolID: toolID, tint: tint, range: range)
             }
         }
     }
 
     @ViewBuilder
-    private func cardCopyButton(toolID: String, tint: Color) -> some View {
+    private func cardCopyButton(toolID: String, tint: Color, range: RangeKey? = nil) -> some View {
         let done = copiedToolID == toolID
         Button {
-            copySingleToolImage(id: toolID)
+            copySingleToolImage(id: toolID, range: range)
         } label: {
             Image(systemName: done ? "checkmark" : "photo.on.rectangle")
                 .font(.system(size: Theme.fontSize(10), weight: .semibold))
@@ -2667,13 +2701,14 @@ struct PanelView: View {
     }
 
     /// Generate a single-tool share card (native-style) for one agent/card.
-    private func copySingleToolImage(id: String) {
+    private func copySingleToolImage(id: String, range: RangeKey? = nil) {
+        let targetRange = range ?? sel
         guard let usage = store.usage,
               let line = UsageSummaryBuilder.line(
-                forToolID: id, usage: usage, range: sel, visibility: toolVisibility
+                forToolID: id, usage: usage, range: targetRange, visibility: toolVisibility
               ) else { return }
         let ok = UsageShareImage.copyToPasteboard(
-            line: line, range: sel, updated: store.lastUpdated
+            line: line, range: targetRange, updated: store.lastUpdated
         )
         guard ok else { return }
         copyFeedback = false
@@ -3130,6 +3165,7 @@ struct PanelView: View {
                 settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
                 settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
                 settingsRow("Command Code", tint: Theme.cmdcode, isOn: $showCmdCode)
+                settingsRow("GitHub Copilot", tint: Theme.copilot, isOn: $showCopilot)
                 settingsRow("Devin", tint: Theme.devin, isOn: $showDevin)
                 settingsRow("MiniMax Code", tint: Theme.minimax, isOn: $showMiniMax)
             }
@@ -4278,7 +4314,7 @@ struct PanelView: View {
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "codebuddy",
                          "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent",
+                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "copilot", "prime_agent",
                          "devin", "minimax"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")

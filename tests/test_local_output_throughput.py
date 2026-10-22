@@ -19,8 +19,9 @@ class LocalOutputThroughputTests(unittest.TestCase):
         ranges["all"] = dict(empty, out=100)
         tools = ("claude codex gemini grok qoder qoderwork qodercli qodercli_cn hermes "
                  "openclaw zcode mimocode pi prime_agent workbuddy workbuddy_ai codebuddy "
-                 "deepseek_harness opencode qwencode kimicode musecode cmdcode devin minimax").split()
+                 "deepseek_harness opencode qwencode kimicode musecode cmdcode devin minimax copilot").split()
         payload = {tool: {"ranges": ranges} for tool in tools}
+        payload["copilot"]["ranges"] = dict(ranges, all=dict(empty, out=13, reason=7, coverage="output_only"))
         payload["claude"].update(session_name="", session_total=0)
         payload["codex"]["reserve_ranges"] = ranges
         for provider in ("cursor", "sub2api", "grok_bot"):
