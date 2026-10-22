@@ -18,9 +18,10 @@ class StartupCollectorTests(unittest.TestCase):
     def test_local_first_pass_keeps_usage_and_never_calls_quota_providers(self):
         with tempfile.TemporaryDirectory(prefix="tokei-startup-") as tmp:
             home = Path(tmp)
-            now = datetime.now().astimezone()
+            # Keep fixture offsets on the same day even when the test runs just after midnight.
+            now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
             claude = home / ".claude/projects/demo/session.jsonl"
-            codex = home / ".codex/sessions/2026/10/13/rollout-demo.jsonl"
+            codex = home / ".codex/sessions" / now.strftime("%Y/%m/%d") / "rollout-demo.jsonl"
             claude.parent.mkdir(parents=True)
             codex.parent.mkdir(parents=True)
             claude.write_text("\n".join(json.dumps(r) for r in _claude_records(now)), encoding="utf-8")
