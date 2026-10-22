@@ -1,3 +1,4 @@
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ActivityReporterTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "Native Swift app tests require macOS")
     def test_default_on_saved_opt_out_payload_persistence_once_per_launch_and_cancellation(self):
         with tempfile.TemporaryDirectory() as tmp:
             binary = str(Path(tmp) / "activity-reporter-check")
