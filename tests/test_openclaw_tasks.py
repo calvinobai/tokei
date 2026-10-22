@@ -773,7 +773,7 @@ class OpenClawTaskTests(unittest.TestCase):
         except ImportError:
             self.skipTest("fixture requires Python 3.14 stdlib zstd")
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             state_db = root / "state" / "openclaw.sqlite"
             agent_db = root / "agents" / "example" / "agent.sqlite"
             now = datetime.now().astimezone().replace(microsecond=0)
