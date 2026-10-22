@@ -438,7 +438,7 @@
 "爆肝日" = "Marathon Day";
 "版本与更新" = "Version & updates";
 "用 VS Code 打开" = "Open in VS Code";
-"用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。" = "Used to count active installs. On by default; can be turned off anytime. On each launch it attempts a single report of a random install ID, Tokei version, and OS name plus major/minor version. The server records first- and last-seen times plus the most recent source IP. No accounts, projects, chats, tokens, costs, or quotas are uploaded. Takes effect on next launch after toggling; the install ID is not multi-device synced.";
+"用于了解应用的活跃安装数量，默认开启，可随时关闭。每次启动仅尝试上报一次随机安装 ID、Tokei 版本及系统名称和主次版本。服务端记录首次和最近活跃时间，并保存最近一次来源 IP。不会上传账号、项目、对话、Token、费用或额度。关闭后停止发送，重新开启于下次启动生效；安装 ID 不参与多设备同步。" = "Used to count active installs. On by default; can be turned off anytime. On each launch it attempts a single report of a random install ID, Tokei version, and OS name plus major/minor version. The server records first- and last-seen times plus the most recent source IP. No accounts, projects, chats, tokens, costs, or quotas are uploaded. Turning it off stops reporting immediately. Turning it back on takes effect on the next launch; the install ID is not multi-device synced.";
 "用到%@%%" = "%@%% used";
 "用量结构" = "Usage breakdown";
 "用量统计不受影响；检测到订阅周期后会自动展示。" = "Usage stats unaffected; shown automatically once a subscription cycle is detected.";
@@ -589,3 +589,18 @@
 "近 %@ 秒" = "Last %@ s";
 "等待采样…" = "Waiting for samples…";
 "本机所有已采集任务的新增输出（含推理）÷ 实际经过时间，最多统计最近 60 秒。并发任务相加，不受日期、卡片显隐或多设备切换影响。基于日志落盘，可能延迟；不含输入、缓存和云端账号用量。" = "New output (including reasoning) across collected local tasks divided by wall time, over up to 60 seconds. Concurrent tasks add together, independent of date, card visibility or device scope. Based on persisted logs, so updates may lag. Excludes input, cache and cloud account usage.";
+
+/* Windows 与性能指标 */
+"打开主窗口" = "Open main window";
+"快捷面板" = "Quick panel";
+"主窗口" = "Main window";
+"点击托盘图标" = "Tray icon click";
+"关闭快捷面板" = "Close quick panel";
+"开启后使用 Grok Bot 自身登录态查询官方额度和 Token，并按 5 分钟缓存。首次使用请点击“授权 Grok Bot”；授权在重启和升级后保留。登录 Token 仅在辅助进程内存中使用。" = "When enabled, queries official quota and tokens using Grok Bot’s own login session, cached for 5 minutes. Click “Authorize Grok Bot” on first use; authorization survives restarts and upgrades. Login tokens stay in helper-process memory only.";
+"此授权功能仅在 Windows 应用中可用。" = "This authorization feature is only available in the Windows app.";
+"Grok Bot 的登录凭据格式暂不支持，请更新 Tokei。" = "This Grok Bot credential format is not supported yet. Please update Tokei.";
+"上次数据 %@" = "Previous data %@";
+"额度更新中…" = "Updating quotas…";
+"平均输出速度（含等待）" = "Avg output speed (incl. wait)";
+"平均速度（含等待）" = "Avg speed (incl. wait)";
+"输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Total output tokens ÷ recorded duration; of %@ requests, %@ include first-token wait, so pure generation speed is unavailable";
