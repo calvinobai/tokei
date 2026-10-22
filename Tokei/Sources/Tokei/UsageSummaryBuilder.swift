@@ -387,16 +387,19 @@ enum UsageSummaryBuilder {
         includesCost: Bool = true, includesCredits: Bool = false,
         reasonIncludedInOutput: Bool = false
     ) {
-        let total = r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
-        let extra = includesCredits && r.credits > 0
+        let outputOnly = id == "copilot"
+        let includesCost = includesCost && !outputOnly
+        let total = outputOnly ? r.out + r.reason : r.in + r.out + r.cr + r.cw + (reasonIncludedInOutput ? 0 : r.reason)
+        if outputOnly && total == 0 && r.sessions == 0 && r.credits == 0 { return }
+        let extra = outputOnly ? L("仅输出") + (r.credits > 0 ? " · \(Fmt.credits(r.credits)) Premium Requests" : "") : includesCredits && r.credits > 0
             ? "\(Fmt.credits(r.credits)) Credits" : nil
         let line = Line(
             id: id, name: name, cost_cny: includesCost ? r.cost_cny : nil,
             cost: includesCost ? r.cost : nil,
             tokens: total, sessions: r.sessions, calls: nil,
-            input: r.in, output: r.out, cacheRead: r.cr, cacheWrite: r.cw,
+            input: outputOnly ? nil : r.in, output: r.out, cacheRead: outputOnly ? nil : r.cr, cacheWrite: outputOnly ? nil : r.cw,
             reason: r.reason > 0 ? r.reason : nil,
-            hit: r.hit > 0 ? r.hit : nil, extra: extra
+            hit: !outputOnly && r.hit > 0 ? r.hit : nil, extra: extra
         )
         if !line.isEmpty { lines.append(line) }
     }

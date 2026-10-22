@@ -14421,7 +14421,7 @@ def scan_cmdcode(bounds, cache):
 # ---------- GitHub Copilot CLI ----------
 # 会话日志 ~/.copilot/session-state/<sid>/events.jsonl,其中 session.shutdown 事件
 # 的 modelMetrics 带每模型 token 与 premium requests 用量。按会话开始时间归日。
-_COPILOT_PARSER_VERSION = 1
+_COPILOT_PARSER_VERSION = 7
 
 
 def _copilot_roots():
@@ -14441,7 +14441,7 @@ def _copilot_roots():
     roots = []
     seen = set()
     for candidate in candidates:
-        root = os.path.abspath(os.path.expanduser(candidate))
+        root = os.path.realpath(os.path.expanduser(candidate))
         key = os.path.normcase(root)
         if key not in seen:
             seen.add(key)
@@ -14458,8 +14458,8 @@ def _copilot_session_files():
         for dirpath, dirnames, filenames in os.walk(root):
             for name in filenames:
                 if name == "events.jsonl" or name.endswith(".jsonl") or name.endswith(".db") or name.endswith(".sqlite"):
-                    files.append(os.path.abspath(os.path.join(dirpath, name)))
-    return sorted(set(files))
+                    files.append(os.path.realpath(os.path.join(dirpath, name)))
+    return sorted({os.path.normcase(path): path for path in files}.values())
 
 
 def _copilot_number(value):
@@ -14500,13 +14500,17 @@ def _copilot_datetime(value):
         return None
 
 
-def _copilot_event_cost(model, inp, out, cr, cw):
-    price_id = _pricing_id(model)
-    if not price_id:
-        return 0.0
-    price = _raw_price(price_id)
-    return (inp / 1e6 * price["in"] + out / 1e6 * price["out"]
-            + cr / 1e6 * price["cache_read"] + cw / 1e6 * price["cache_write"])
+def _copilot_output_tokens(output, reasoning):
+    """Copilot reasoningTokens is a subset of raw outputTokens."""
+    output = _copilot_number(output)
+    reasoning = min(output, _copilot_number(reasoning))
+    return output - reasoning, reasoning
+
+
+def _copilot_reported(target, inp=0, cr=0, cw=0):
+    # Numeric-only cache metadata; never part of normalized usage or billing.
+    for key, value in (("_reported_in", inp), ("_reported_cr", cr), ("_reported_cw", cw)):
+        target[key] = target.get(key, 0) + _copilot_number(value)
 
 
 def _scan_copilot_db(path):
@@ -14529,10 +14533,22 @@ def _scan_copilot_db(path):
                 continue
             day_key = dt.date().isoformat()
             day = days.setdefault(day_key, _empty_token_day())
-            i = _copilot_number(inp); o = _copilot_number(out)
-            c = _copilot_number(cr); w = _copilot_number(cw); r = _copilot_number(reason)
-            cost = _copilot_event_cost(model or "", i, o, c, w)
-            _add_token_usage(day, i, o, c, w, r, cost, model=model)
+            i = _copilot_number(inp)
+            o, r = _copilot_output_tokens(out, reason)
+            c = _copilot_number(cr); w = _copilot_number(cw)
+            _copilot_reported(day, i, c, w)
+            _add_token_usage(day, out=o, reason=r, model=model)
+            if isinstance(sess, str) and sess:
+                if sess not in day.setdefault("sessions", []):
+                    day["sessions"].append(sess)
+            if isinstance(cwd, str) and cwd:
+                project = day.setdefault("projects", {}).setdefault(cwd, {
+                    "tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+                project["tokens"] += o + r
+                if model:
+                    project["models"][model] = project["models"].get(model, 0) + o + r
+                if isinstance(sess, str) and sess and sess not in project["sessions"]:
+                    project["sessions"].append(sess)
             if sid is None and isinstance(sess, str):
                 sid = sess
             if proj is None and isinstance(cwd, str) and cwd:
@@ -14543,135 +14559,274 @@ def _scan_copilot_db(path):
     return days, sid, proj
 
 
+def _copilot_text(*values):
+    return next((value for value in values if isinstance(value, str) and value), None)
+
+
+def _copilot_record_project(record, data):
+    for source in (record, data):
+        for key in ("cwd", "project", "workspace", "gitRoot"):
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                return value
+        context = source.get("context")
+        if isinstance(context, dict):
+            value = _copilot_text(context.get("cwd"), context.get("gitRoot"))
+            if value:
+                return value
+    return None
+
+
+def _copilot_normalized_usage(usage, model):
+    # Preserve both the generic usage aliases and the older nested input map.
+    if not any(key in usage for key in ("inputTokens", "input_tokens", "prompt_tokens")):
+        if isinstance(usage.get("input"), dict):
+            usage = usage["input"]
+    fields = (
+        ("inputTokens", "input_tokens", "prompt_tokens", "input"),
+        ("outputTokens", "output_tokens", "completion_tokens", "output"),
+        ("cacheReadTokens", "cache_read_tokens", "cacheRead", "cached_tokens"),
+        ("cacheWriteTokens", "cache_write_tokens", "cacheWrite"),
+        ("reasoningTokens", "reasoning_tokens", "reasoning"),
+    )
+    values = [_copilot_number(next((usage[key] for key in aliases if key in usage), 0))
+              for aliases in fields]
+    values[1], values[4] = _copilot_output_tokens(values[1], values[4])
+    event = _empty_token_day()
+    _copilot_reported(event, values[0], values[2], values[3])
+    _add_token_usage(event, out=values[1], reason=values[4], model=model)
+    return event
+
+
+def _copilot_has_model_usage(usage):
+    for key in ("outputTokens",):
+        value = usage.get(key)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            if int(value) >= 0:
+                return True
+        except (TypeError, ValueError, OverflowError):
+            pass
+    return False
+
+
+def _copilot_preferred_records(records):
+    # A usable shutdown model summary is authoritative for the whole session,
+    # including when request details and the summary live in different files.
+    authoritative = {event["session"] for event in records if event["kind"] == "shutdown"}
+    return [event for event in records
+            if event["session"] not in authoritative or event["kind"] == "shutdown"]
+
+
+def _copilot_add_record(days, day_key, event):
+    day = days.setdefault(day_key, _empty_token_day())
+    usage, sid, proj = event["usage"], event["session"], event.get("project")
+    _merge_live_token_day(day, usage)
+    _copilot_reported(day, usage.get("_reported_in"), usage.get("_reported_cr"), usage.get("_reported_cw"))
+    if sid not in day.setdefault("sessions", []):
+        day["sessions"].append(sid)
+    if proj:
+        project = day.setdefault("projects", {}).setdefault(proj, {
+            "tokens": 0, "cost": 0.0, "models": {}, "sessions": []})
+        project["tokens"] += token_total(usage)
+        project["cost"] += usage.get("cost", 0)
+        for model, value in usage.get("models", {}).items():
+            project["models"][model] = project["models"].get(model, 0) + token_total(value)
+        if sid not in project["sessions"]:
+            project["sessions"].append(sid)
+
+
 def _scan_copilot_session(path):
-    if path.endswith(".db") or path.endswith(".sqlite"):
+    if path.endswith((".db", ".sqlite")):
         return _scan_copilot_db(path)
-    days = {}
     sid = None
     proj = None
     start_dt = None
-    shutdowns = []
+    records = []
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                if '"session.start"' not in line and '"session.shutdown"' not in line:
-                    continue
+                # Generic usage records need not contain a session event string.
                 try:
                     record = json.loads(line)
                 except (TypeError, ValueError):
                     continue
                 if not isinstance(record, dict):
                     continue
-                rtype = record.get("type")
                 data = record.get("data")
                 if not isinstance(data, dict):
                     data = {}
-                # Generic per-event usage record support (fallback for simplified fixtures).
-                usage_candidate = record.get("usage")
-                if not isinstance(usage_candidate, dict):
-                    usage_candidate = data.get("usage")
-                ts_candidate = (record.get("timestamp") or record.get("startTime")
-                                or record.get("createdAt") or record.get("created_at")
-                                or data.get("timestamp") or data.get("startTime")
-                                or data.get("createdAt"))
-                if isinstance(usage_candidate, dict) and ts_candidate and rtype not in ("session.start", "session.shutdown"):
-                    dt = _copilot_datetime(ts_candidate)
-                    if dt is not None:
-                        model = (record.get("model") or record.get("modelId")
-                                 or record.get("model_id") or data.get("model")
-                                 or data.get("modelId"))
-                        u = usage_candidate
-                        if "inputTokens" not in u and "input_tokens" not in u and "prompt_tokens" not in u and "input" in u:
-                            u = u.get("input") or {}
-                        inp = _copilot_number(u.get("inputTokens", u.get("input_tokens", u.get("prompt_tokens", u.get("input")))))
-                        out = _copilot_number(u.get("outputTokens", u.get("output_tokens", u.get("completion_tokens", u.get("output")))))
-                        cr = _copilot_number(u.get("cacheReadTokens", u.get("cache_read_tokens", u.get("cacheRead", u.get("cached_tokens", 0)))))
-                        cw = _copilot_number(u.get("cacheWriteTokens", u.get("cache_write_tokens", 0)))
-                        reason = _copilot_number(u.get("reasoningTokens", u.get("reasoning_tokens", 0)))
-                        cost = _copilot_event_cost(model or "", inp, out, cr, cw)
-                        day = days.setdefault(dt.date().isoformat(), _empty_token_day())
-                        _add_token_usage(day, inp, out, cr, cw, reason, cost, model=model)
-                        if sid is None:
-                            val = record.get("sessionId") or record.get("session_id") or data.get("sessionId")
-                            if isinstance(val, str) and val:
-                                sid = val
-                        if proj is None:
-                            for key in ("cwd", "project", "workspace", "gitRoot"):
-                                val = record.get(key) or data.get(key)
-                                if isinstance(val, str) and val:
-                                    proj = val
-                                    break
+                row_sid = _copilot_text(record.get("sessionId"), record.get("session_id"),
+                                        data.get("sessionId"), data.get("session_id"))
+                row_proj = _copilot_record_project(record, data)
+                sid = sid or row_sid
+                proj = proj or row_proj
+                dt = next((dt for source in (record, data)
+                           for key in ("timestamp", "startTime", "createdAt", "created_at")
+                           if (dt := _copilot_datetime(source.get(key))) is not None), None)
+                identity = _copilot_text(record.get("id"), record.get("eventId"),
+                                         record.get("requestId"), record.get("request_id"),
+                                         data.get("eventId"), data.get("requestId"),
+                                         data.get("request_id"))
+                kind = record.get("type")
+                if kind == "session.start":
+                    if start_dt is None:
+                        start_dt = _copilot_datetime(data.get("startTime")) or dt
                     continue
-                # Top-level token fields without nested usage
-                if ts_candidate and ("inputTokens" in record or "input_tokens" in record) and rtype not in ("session.start", "session.shutdown"):
-                    dt = _copilot_datetime(ts_candidate)
-                    if dt is not None:
-                        model = record.get("model") or record.get("modelId") or record.get("model_id")
-                        inp = _copilot_number(record.get("inputTokens", record.get("input_tokens", 0)))
-                        out = _copilot_number(record.get("outputTokens", record.get("output_tokens", 0)))
-                        cr = _copilot_number(record.get("cacheReadTokens", record.get("cache_read_tokens", 0)))
-                        cw = _copilot_number(record.get("cacheWriteTokens", record.get("cache_write_tokens", 0)))
-                        reason = _copilot_number(record.get("reasoningTokens", record.get("reasoning_tokens", 0)))
-                        cost = _copilot_event_cost(model or "", inp, out, cr, cw)
-                        day = days.setdefault(dt.date().isoformat(), _empty_token_day())
-                        _add_token_usage(day, inp, out, cr, cw, reason, cost, model=model)
+                if kind == "session.shutdown":
+                    event = _empty_token_day()
+                    authoritative = False
+                    metrics = data.get("modelMetrics")
+                    if isinstance(metrics, dict):
+                        for model, info in metrics.items():
+                            usage = info.get("usage") if isinstance(info, dict) else None
+                            if not isinstance(usage, dict):
+                                continue
+                            if _copilot_has_model_usage(usage):
+                                authoritative = True
+                                normalized = _copilot_normalized_usage(usage, model)
+                                _merge_live_token_day(event, normalized)
+                                _copilot_reported(event, normalized.get("_reported_in"), normalized.get("_reported_cr"), normalized.get("_reported_cw"))
+                    try:
+                        premium = float(data.get("totalPremiumRequests", 0))
+                        if math.isfinite(premium) and premium >= 0:
+                            event["credits"] = premium
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                    if authoritative or event["credits"] > 0:
+                        records.append({
+                            "id": identity, "kind": "shutdown" if authoritative else "premium",
+                            "timestamp": dt.isoformat() if dt is not None else None,
+                            "day": None, "session_start": data.get("sessionStartTime"),
+                            "session": row_sid, "project": row_proj, "usage": event})
                     continue
 
-                if rtype == "session.start":
-                    if sid is None:
-                        val = data.get("sessionId")
-                        if isinstance(val, str) and val:
-                            sid = val
-                    if proj is None:
-                        ctx = data.get("context")
-                        if isinstance(ctx, dict):
-                            for key in ("cwd", "gitRoot"):
-                                val = ctx.get(key)
-                                if isinstance(val, str) and val:
-                                    proj = val
-                                    break
-                    if start_dt is None:
-                        start_dt = _copilot_datetime(data.get("startTime"))
-                elif rtype == "session.shutdown":
-                    shutdowns.append(data)
-    except OSError:
-        return days, sid, proj
-    if not shutdowns:
-        return days, sid, proj
-    if start_dt is None:
-        for sh in shutdowns:
-            start_dt = _copilot_datetime(sh.get("sessionStartTime"))
-            if start_dt is not None:
-                break
-    if start_dt is None:
-        start_dt = datetime.now().astimezone()
-    day_key = start_dt.date().isoformat()
-    day = days.setdefault(day_key, _empty_token_day())
-    for sh in shutdowns:
-        mm = sh.get("modelMetrics")
-        if isinstance(mm, dict):
-            for model, info in mm.items():
-                if not isinstance(info, dict):
-                    continue
-                usage = info.get("usage")
+                # Fallbacks: usage at either level, or top-level token fields.
+                usage = record.get("usage")
                 if not isinstance(usage, dict):
+                    usage = data.get("usage")
+                if not isinstance(usage, dict):
+                    usage = next((source for source in (record, data)
+                                  if any(key in source for key in (
+                                      "inputTokens", "input_tokens", "prompt_tokens",
+                                      "outputTokens", "output_tokens", "completion_tokens", "output"))), None)
+                if not isinstance(usage, dict) or dt is None:
                     continue
-                inp = _copilot_number(usage.get("inputTokens"))
-                out = _copilot_number(usage.get("outputTokens"))
-                cr = _copilot_number(usage.get("cacheReadTokens"))
-                cw = _copilot_number(usage.get("cacheWriteTokens"))
-                reason = _copilot_number(usage.get("reasoningTokens"))
-                cost = _copilot_event_cost(model, inp, out, cr, cw)
-                _add_token_usage(day, inp, out, cr, cw, reason, cost, model=model)
-        pr = sh.get("totalPremiumRequests")
-        if pr is not None:
-            try:
-                day["credits"] = float(day.get("credits", 0) or 0) + float(pr)
-            except (TypeError, ValueError):
-                pass
-    sid = sid or os.path.splitext(os.path.basename(path))[0]
-    # remove parent dir name? keep
+                model = _copilot_text(record.get("model"), record.get("modelId"),
+                                      record.get("model_id"), data.get("model"),
+                                      data.get("modelId"), data.get("model_id"))
+                records.append({
+                    "id": identity, "kind": "fallback",
+                    "timestamp": dt.astimezone(timezone.utc).isoformat(),
+                    "day": dt.date().isoformat(), "session": row_sid,
+                    "project": row_proj, "usage": _copilot_normalized_usage(usage, model)})
+    except OSError:
+        return {}, sid, proj
+
+    sid = sid or (os.path.basename(os.path.dirname(path))
+                  if os.path.basename(path) == "events.jsonl"
+                  else os.path.splitext(os.path.basename(path))[0])
+    if start_dt is None:
+        start_dt = next((dt for event in records
+                         if (dt := _copilot_datetime(event.get("session_start"))) is not None), None)
+    for event in records:
+        event["session"] = event["session"] or sid
+        event["project"] = event["project"] or proj
+        if event["day"] is None:
+            event["day"] = (start_dt or datetime.now().astimezone()).date().isoformat()
+        event.pop("session_start", None)
+    days = {}
+    for event in _copilot_preferred_records(records):
+        _copilot_add_record(days, event["day"], event)
+        # Only normalized accounting/identity metadata is cached, never text.
+        days[event["day"]].setdefault("_events", []).append(event)
     return days, sid, proj
+
+
+def _copilot_canonical_days(files):
+    """Reconcile mirrors without merging distinct equal-valued requests.
+
+    Physical source aliases count once. All valid DB day.sessions are
+    authoritative; JSON only contributes sessions outside that DB coverage.
+    Stable IDs win. Timestamped id-less rows use per-file multiplicities: exact
+    mirrored occurrences count once, repeated occurrences within a file survive,
+    and disjoint timestamps stay separate. Only untimed/id-less rows need a
+    canonical-file fallback because their separate identity is unknowable.
+    """
+    canonical = {}
+    sessions = {}
+    physical_files = []
+    seen_paths = set()
+    database_sessions = set()
+    for path, entry in sorted(files.items()):
+        if not isinstance(entry, dict):
+            continue
+        canonical[path] = {}
+        physical = os.path.normcase(os.path.realpath(path))
+        if physical in seen_paths:
+            continue
+        seen_paths.add(physical)
+        physical_files.append((path, entry))
+        if path.endswith((".db", ".sqlite")):
+            canonical[path] = entry.get("days", {})
+            # Every valid row contributes its SID to day.sessions. entry.sid
+            # records only the first row and cannot establish DB coverage.
+            for day in canonical[path].values():
+                database_sessions.update(sid for sid in day.get("sessions", [])
+                                         if isinstance(sid, str) and sid.strip())
+
+    for path, entry in physical_files:
+        if path.endswith((".db", ".sqlite")):
+            continue
+        for day_key, day in entry.get("days", {}).items():
+            for event in day.get("_events", []):
+                event = dict(event)
+                event.setdefault("session", entry.get("sid") or path)
+                event.setdefault("project", entry.get("proj"))
+                event.setdefault("day", day_key)
+                # DB usage is authoritative for that session, across all days.
+                # JSON remains a fallback only for sessions absent from valid
+                # DB rows; never infer overlap by timestamps or token values.
+                if event["session"] in database_sessions:
+                    continue
+                sessions.setdefault(event["session"], []).append((path, event))
+
+    for records in sessions.values():
+        if any(event["kind"] == "shutdown" for _, event in records):
+            records = [(path, event) for path, event in records if event["kind"] == "shutdown"]
+        seen_ids = set()
+        per_file = {}
+        mirrored_occurrences = {}
+        untimed = {}
+        for path, event in records:
+            identity = event.get("id")
+            if identity:
+                key = (event["kind"], identity)
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+            elif event.get("timestamp"):
+                # Counter equality alone is never enough to collapse a request.
+                key = json.dumps([event["kind"], event["timestamp"], event.get("project"),
+                                  event["usage"]], sort_keys=True, separators=(",", ":"))
+                file_key = (path, key)
+                occurrence = per_file.get(file_key, 0) + 1
+                per_file[file_key] = occurrence
+                if occurrence <= mirrored_occurrences.get(key, 0):
+                    continue
+                mirrored_occurrences[key] = occurrence
+            else:
+                untimed.setdefault(path, []).append(event)
+                continue
+            _copilot_add_record(canonical[path], event["day"], event)
+
+        if untimed:
+            path, events = max(untimed.items(), key=lambda item: (
+                len(item[1]), sum(token_total(event["usage"]) for event in item[1]), item[0]))
+            for event in events:
+                _copilot_add_record(canonical[path], event["day"], event)
+    return canonical
 
 
 def scan_copilot(bounds, cache):
@@ -14692,6 +14847,12 @@ def scan_copilot(bounds, cache):
         except OSError:
             continue
         signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+        if path.endswith((".db", ".sqlite")):
+            try:
+                wal = os.stat(path + "-wal")
+                signature += f":{wal.st_mtime_ns}:{wal.st_size}"
+            except OSError:
+                signature += ":no-wal"
         entry = fc.get(path)
         if (not isinstance(entry, dict) or entry.get("sig") != signature
                 or entry.get("parser_version") != _COPILOT_PARSER_VERSION):
@@ -14708,26 +14869,47 @@ def scan_copilot(bounds, cache):
         fc.pop(path, None)
         changed = True
 
+    canonical = _copilot_canonical_days(fc)
+    for path, entry in fc.items():
+        days = canonical.get(path, {})
+        if entry.get("canonical_days") != days:
+            entry["canonical_days"] = days
+            changed = True
     live_days = {}
     live_sessions = {}
     live_projects = {}
     for path, entry in fc.items():
         if not isinstance(entry, dict):
             continue
-        for day_key, day in entry.get("days", {}).items():
+        for day_key, day in entry.get("canonical_days", {}).items():
             try:
                 date.fromisoformat(day_key)
             except (TypeError, ValueError):
                 continue
+            sessions = day.get("sessions") or [entry.get("sid") or path]
             _merge_live_token_day(live_days.setdefault(day_key, _empty_token_day()), day)
-            session = entry.get("sid") or path
-            live_sessions.setdefault(day_key, set()).add(session)
-            project = entry.get("proj")
-            if isinstance(project, str) and project:
-                live_projects.setdefault(day_key, set()).add(project)
+            live_sessions.setdefault(day_key, set()).update(sessions)
+            projects = day.get("projects") or {}
+            live_projects.setdefault(day_key, set()).update(projects)
     for day_key, day in live_days.items():
+        # Replace prior double-counted live days through the existing ledger
+        # schema migration contract, preserving days whose source logs are gone.
+        day["_ledger_version"] = _COPILOT_PARSER_VERSION
         day["sessions"] = sorted(live_sessions.get(day_key, set()))
         day["projects"] = sorted(live_projects.get(day_key, set()))
+    # Migrate archived days too: ambiguous inputs/prices cannot re-enter totals
+    # through the generic ledger/timeline fallback after source logs are gone.
+    for day_key, day in _load_ledger().get("tools", {}).get("copilot", {}).items():
+        if day_key in live_days or not isinstance(day, dict) or day.get("_ledger_version", 0) >= _COPILOT_PARSER_VERSION:
+            continue
+        legacy = day.get("_ledger_version", 0) < 5
+        for value in [day, *day.get("models", {}).values()]:
+            if legacy:
+                value["out"], value["reason"] = _copilot_output_tokens(value.get("out"), value.get("reason"))
+            for key in ("in", "cr", "cw", "cost", "cost_cny"):
+                value[key] = 0
+        day["_ledger_version"] = _COPILOT_PARSER_VERSION
+        _ledger_mark_dirty([day_key])
     for day_key, day in ledger_reconcile("copilot", live_days).items():
         try:
             local_day = date.fromisoformat(day_key)
@@ -14735,14 +14917,25 @@ def scan_copilot(bounds, cache):
             continue
         for range_key in classify_date(local_day, bounds):
             _merge_token_day(B[range_key], day)
-            B[range_key]["sessions"].update(live_sessions.get(day_key, set()))
+            B[range_key]["sessions"].update(day.get("sessions") or live_sessions.get(day_key, set()))
     if changed:
         cache["_dirty"] = True
+    for bucket in B.values():
+        bucket["coverage"] = "output_only"
     return {"ranges": B}
 
 
 # token total alias for consistency
 _copilot_token_total = token_total
+
+
+def _copilot_public_range(bucket):
+    # Publish the existing normalized schema with explicit partial coverage.
+    return {"coverage": "output_only", "in": 0, "cr": 0, "cw": 0,
+            "hit": 0, "cost": 0, "cost_cny": 0,
+            "out": bucket["out"], "reason": bucket["reason"],
+            "credits": bucket.get("credits", 0), "sessions": len(bucket["sessions"]),
+            "models": _format_token_models(bucket["models"], include_prices=False)}
 
 # aliases
 scan_copilot_cli = scan_copilot
@@ -15263,7 +15456,7 @@ def compute():
     museranges = {k: token_usage_range(muse["ranges"][k]) for k in RANGE_KEYS}
 
     cmdcranges = {k: token_usage_range(cmdcode["ranges"][k]) for k in RANGE_KEYS}
-    copilotranges = {k: token_usage_range(copilot["ranges"][k]) for k in RANGE_KEYS}
+    copilotranges = {k: _copilot_public_range(copilot["ranges"][k]) for k in RANGE_KEYS}
 
     cur = cc["cur"]
     cur_total = cur["in"] + cur["out"] + cur["cr"] + cur["cw"]
@@ -17843,7 +18036,6 @@ _PROJECT_SOURCES = (
     ("kimicode",     "Kimi Code",       False, "sid",   "token_total"),
     ("musecode",     "Muse Code",       True,  "sid",   "_muse_token_total"),
     ("cmdcode",      "Command Code",    True,  "sid",   "token_total"),
-    ("copilot",      "GitHub Copilot",  True,  "sid",   "token_total"),
 )
 
 # 第二种形状：一个库里装着多个项目（数据库型工具）。项目挂在「天」上：
@@ -17851,6 +18043,7 @@ _PROJECT_SOURCES = (
 # 一文件一会话的工具用上面 _PROJECT_SOURCES 的形状，两种都走同一个贡献流。
 _PROJECT_DAY_SOURCES = (
     # tool_key,  显示名
+    ("copilot",  "GitHub Copilot"),
     ("devin",    "Devin"),
     ("minimax",  "MiniMax Code"),
     ("hermes",   "Hermes"),
@@ -17926,7 +18119,8 @@ def _project_contributions(cache):
         for entry in tool_cache.values():
             if not isinstance(entry, dict):
                 continue
-            for day_key, day in (entry.get("days") or {}).items():
+            for day_key, day in ((entry.get("canonical_days") if tool_key == "copilot"
+                                  else entry.get("days")) or {}).items():
                 if not isinstance(day, dict):
                     continue
                 by_project = day.get("projects")

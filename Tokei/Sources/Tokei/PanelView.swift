@@ -34,7 +34,6 @@ struct PanelView: View {
     @State private var kimiCodeModelsOpen = false
     @State private var museCodeModelsOpen = false
     @State private var cmdCodeModelsOpen = false
-    @State private var copilotModelsOpen = false
     @State private var devinModelsOpen = false
     @State private var miniMaxModelsOpen = false
     @State private var openClawModelsOpen = false
@@ -578,9 +577,7 @@ struct PanelView: View {
             ToolCardItem(id: "copilot", name: "GitHub Copilot", visible: showCopilot,
                          active: cpr.sessions > 0 || cpr.credits > 0,
                          tint: Theme.copilot,
-                         content: AnyView(tokenUsageBlock(title: "GitHub Copilot", cpr, tint: Theme.copilot,
-                                                          modelsOpen: $copilotModelsOpen, showsCredits: true,
-                                                          toolID: "copilot"))),
+                         content: AnyView(copilotOutputBlock(cpr))),
         ]
     }
 
@@ -1906,6 +1903,26 @@ struct PanelView: View {
 
     // MARK: - Token usage cards
     @ViewBuilder
+    func copilotOutputBlock(_ r: TokenUsageRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("GitHub Copilot", tint: Theme.copilot, sessions: r.sessions, toolID: "copilot")
+            if r.sessions > 0 || r.out + r.reason > 0 || r.credits > 0 {
+                CostHeadline(value: Fmt.human(r.out + r.reason), caption: "\(sel.label) · \(L("仅输出"))", tint: Theme.copilot)
+                let premium: [Metric] = r.credits > 0
+                    ? [.init("circle.hexagongrid.fill", "Premium Requests", Fmt.credits(r.credits))] : []
+                metricGrid([], hit: 0, extra: premium + [
+                    .init("arrow.up", L("输出"), Fmt.human(r.out)),
+                    .init("brain", L("推理"), Fmt.human(r.reason))
+                ], tint: Theme.copilot)
+                ForEach(r.models) { model in
+                    Text("\(L10n.data(model.name)) · \(L("仅输出")): \(Fmt.human(model.out + model.reason)) (\(L("输出")) \(Fmt.human(model.out)) · \(L("推理")) \(Fmt.human(model.reason)))")
+                        .font(.system(size: Theme.fontSize(10)))
+                        .foregroundStyle(Theme.tSecondary)
+                }
+            } else { emptyHint }
+        }
+    }
+
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
                          showsCost: Bool = true, showsCredits: Bool = false,

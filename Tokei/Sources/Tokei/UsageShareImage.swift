@@ -346,7 +346,7 @@ private func nativeToolCard(
         }
 
         if let tokens = line.tokens, tokens > 0 {
-            CostHeadline(value: Fmt.human(tokens), caption: L("%@ 总量", rangeLabel), tint: tint)
+            CostHeadline(value: Fmt.human(tokens), caption: line.id == "copilot" ? L("仅输出") : L("%@ 总量", rangeLabel), tint: tint)
         }
 
         LazyVGrid(
@@ -358,9 +358,9 @@ private func nativeToolCard(
                 MetricCell(icon: "dollarsign.circle", label: L("≈成本"),
                            value: nativeMoney(cost, line.cost_cny), tint: tint)
             }
-            if let extra = line.extra, !extra.isEmpty {
-                MetricCell(icon: "circle.hexagongrid.fill", label: "Credits",
-                           value: extra.replacingOccurrences(of: " Credits", with: ""), tint: tint)
+            if let extra = line.extra, !extra.isEmpty, line.id != "copilot" || extra.contains(" Premium Requests") {
+                MetricCell(icon: "circle.hexagongrid.fill", label: line.id == "copilot" ? "Premium Requests" : "Credits",
+                           value: line.id == "copilot" ? extra.replacingOccurrences(of: L("仅输出") + " · ", with: "").replacingOccurrences(of: " Premium Requests", with: "") : extra.replacingOccurrences(of: " Credits", with: ""), tint: tint)
             }
             if let hit = line.hit, hit > 0 {
                 RingMetricCell(value: hit, label: "Cache Hit", tint: tint)
