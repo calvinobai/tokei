@@ -301,9 +301,17 @@ struct QuotaHistoryView: View {
                             .font(.system(size: Theme.fontSize(10)))
                             .foregroundStyle(Theme.tTertiary)
                     }
-                    Text(Fmt.grouped(cycle.tokens))
-                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
-                        .foregroundStyle(Theme.tTertiary)
+                    HStack(spacing: 6) {
+                        if let cost = cycle.costLabel {
+                            Text("≈ \(cost)")
+                                .font(.system(size: Theme.fontSize(11), weight: .semibold, design: .monospaced))
+                                .foregroundStyle(Theme.tSecondary)
+                                .help(L("按 API 价折算的成本，首尾不满一天的部分按 token 占比分摊"))
+                        }
+                        Text(Fmt.grouped(cycle.tokens))
+                            .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                            .foregroundStyle(Theme.tTertiary)
+                    }
                 }
                 Spacer()
                 if let projected = cycle.projectedTotal {
@@ -316,6 +324,11 @@ struct QuotaHistoryView: View {
                             .foregroundStyle(Theme.tSecondary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
+                        if let projectedCost = cycle.projectedCost {
+                            Text(String(format: "≈ $%.0f", projectedCost))
+                                .font(.system(size: Theme.fontSize(10), design: .monospaced))
+                                .foregroundStyle(Theme.tTertiary)
+                        }
                     }
                 }
             }
@@ -398,6 +411,12 @@ struct QuotaHistoryView: View {
                         .font(.system(size: Theme.fontSize(11), weight: .semibold, design: .rounded))
                         .foregroundStyle(Theme.tSecondary)
                         .frame(width: 52, alignment: .trailing)
+                    Text(cycle.cost.map { String(format: "$%.0f", $0) } ?? "—")
+                        .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                        .foregroundStyle(Theme.tTertiary)
+                        .lineLimit(1)
+                        .frame(width: 44, alignment: .trailing)
+                        .help(cycle.costLabel.map { L("这个周期约花了 %@", $0) } ?? "")
                     // 按最宽的「用到100%」留列宽：译文（使用率 100%）更长，写死 52 会截成「…」
                     ZStack(alignment: .trailing) {
                         Text(L("用到%@%%", "100")).hidden()

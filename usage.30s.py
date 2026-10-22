@@ -18333,8 +18333,22 @@ def _quota_peer_boundary(tools, tool, day_key, bounds, day_total):
     return day_total * (hi_hour - lo_hour) // 24, True
 
 
+def _quota_day_cost(tools, tool, day_key):
+    entry = (tools.get(tool) or {}).get(day_key)
+    if not isinstance(entry, dict):
+        return 0.0
+    try:
+        return float(entry.get("cost", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _quota_window_tokens(devices, tool, key, start, end, self_events):
-    """→ (合计, {设备: token}, 是否含折算值)。self_events 为 None 时本机也走 hours。"""
+    """→ (合计, {设备: token}, 是否含折算值, 美元成本)。self_events 为 None 时本机也走 hours。
+
+    成本只有日粒度:整日取账本当天的 cost,首尾半天按切出来的 token 占当天的比例摊。
+    一天里模型构成大体稳定,摊出来的误差远小于周期本身的量级。
+    """
     interior, boundary = _quota_window_days(start, end)
     self_by_day = {}
     for ts, day, amount in self_events or ():
@@ -18343,9 +18357,11 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
 
     per_device = {}
     approx = False
+    cost = 0.0
     for name, tools, _snapshot, daily in devices:
         own = name == _QUOTA_SELF_DEVICE and self_events is not None
         total = sum(int((daily.get(day) or {}).get(key, 0)) for day in interior)
+        cost += sum(_quota_day_cost(tools, tool, day) for day in interior)
         for day in boundary:
             bounds = _quota_day_hour_bounds(day, start, end)
             if bounds is None:
@@ -18353,13 +18369,15 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
             day_total = int((daily.get(day) or {}).get(key, 0))
             # 事件有就用事件(最准);事件空但账本当天有量 = 日志被清理过,退回折算。
             if own and (self_by_day.get(day) or not day_total):
-                total += self_by_day.get(day, 0)
-                continue
-            amount, guessed = _quota_peer_boundary(tools, tool, day, bounds, day_total)
+                amount = self_by_day.get(day, 0)
+            else:
+                amount, guessed = _quota_peer_boundary(tools, tool, day, bounds, day_total)
+                approx = approx or (guessed and amount > 0)
             total += amount
-            approx = approx or (guessed and amount > 0)
+            if day_total > 0:
+                cost += _quota_day_cost(tools, tool, day) * min(amount / day_total, 1.0)
         per_device[name] = total
-    return sum(per_device.values()), per_device, approx
+    return sum(per_device.values()), per_device, approx, round(cost, 4)
 
 
 def _quota_tool_reading(source, tool):
@@ -18586,7 +18604,7 @@ def build_quota_detail():
             events[tool] = (_quota_claude_events(cache) if tool == "claude"
                             else _quota_codex_events(codex_spans, cache) if tool == "codex"
                             else None)
-        tokens, per_device, approx = _quota_window_tokens(
+        tokens, per_device, approx, cost = _quota_window_tokens(
             devices, tool, keys[tool], start, end, events[tool])
         cycles.append({
             "tool": tool,
@@ -18594,6 +18612,7 @@ def build_quota_detail():
             "end": end,
             "used_pct": used,
             "tokens": tokens,
+            "cost": cost,
             "devices": per_device,
             "approx": approx,
             "current": current,

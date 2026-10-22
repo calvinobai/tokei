@@ -19,6 +19,8 @@ struct QuotaCycle: Codable, Identifiable {
     var end: Int
     var used_pct: Double?
     var tokens: Int
+    /// 按 API 价折算的美元成本；旧版脚本写的缓存没有这个字段。
+    var cost: Double?
     var devices: [String: Int]
     var approx: Bool
     var current: Bool
@@ -32,6 +34,16 @@ struct QuotaCycle: Codable, Identifiable {
     var projectedTotal: Int? {
         guard let used = used_pct, used >= 3, tokens > 0 else { return nil }
         return Int(Double(tokens) / used * 100)
+    }
+
+    /// 照当前进度外推整个周期的成本，口径同 projectedTotal。
+    var projectedCost: Double? {
+        guard let used = used_pct, used >= 3, let cost, cost > 0 else { return nil }
+        return cost / used * 100
+    }
+
+    var costLabel: String? {
+        cost.map { String(format: "$%.2f", $0) }
     }
 
     var deviceBreakdown: [(name: String, tokens: Int)] {

@@ -224,6 +224,37 @@ class DeviceLedgerAnchorTests(unittest.TestCase):
         self.assertEqual([r["reset"] for r in peer_anchors[0]["codex"]], [5 * WEEK])
 
 
+class QuotaWindowCostTests(unittest.TestCase):
+    def _devices(self, tools):
+        return [("peer", tools, {}, USAGE._quota_daily_from_tools(tools))]
+
+    def test_interior_days_take_full_cost_and_edges_split_by_token_share(self):
+        hours = [0] * 24
+        hours[18] = 300
+        hours[6] = 100
+        tools = {"claude": {
+            "2026-03-02": {"in": 400, "cost": 8.0, "hours": hours},
+            "2026-03-03": {"in": 1000, "cost": 5.0},
+            "2026-03-04": {"in": 50, "cost": 99.0},
+        }}
+        start = USAGE._quota_local_day_range("2026-03-02")[0] + 12 * 3600
+        end = USAGE._quota_local_day_range("2026-03-04")[0]
+        tokens, _per_device, approx, cost = USAGE._quota_window_tokens(
+            self._devices(tools), "claude", "c", start, end, None)
+        self.assertEqual(tokens, 1300)
+        self.assertFalse(approx)
+        # 3 月 2 日下午占当天 3/4 的 token,成本也只摊 3/4;3 月 4 日不在窗口里。
+        self.assertAlmostEqual(cost, 5.0 + 8.0 * 0.75)
+
+    def test_day_without_tokens_contributes_no_cost(self):
+        tools = {"claude": {"2026-03-02": {"cost": 3.0}}}
+        start = USAGE._quota_local_day_range("2026-03-02")[0] + 6 * 3600
+        end = start + 6 * 3600
+        *_rest, cost = USAGE._quota_window_tokens(
+            self._devices(tools), "claude", "c", start, end, None)
+        self.assertEqual(cost, 0.0)
+
+
 class SyncSnapshotAnchorTests(unittest.TestCase):
     def _snapshot(self, anchors):
         written = {}

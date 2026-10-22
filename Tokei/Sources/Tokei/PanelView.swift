@@ -5,6 +5,7 @@ import TokeiUpdateSecurity
 struct PanelView: View {
     @ObservedObject var store: Store
     @ObservedObject var layout: PanelLayoutContext = PanelLayoutContext()
+    @ObservedObject private var cycleDetail = QuotaDetailRepository.shared
     var scrollable = true
     /// 一次性量尺寸的 probe 从哪个页签画起；平时的面板总是从「今日」开始。
     static var initialRange: RangeKey = .today
@@ -659,6 +660,7 @@ struct PanelView: View {
                 if let q7 = c.q7 {
                     quotaRow(title: L("周 · 全部剩余"), pct: 100 - q7, reset: c.q7_reset,
                              tint: Theme.claude, stale: c.q7_stale == true)
+                    cycleSpendRow("claude")
                 }
                 if let qf = c.qf {
                     quotaRow(title: L("周 · Fable 剩余"), pct: 100 - qf, reset: c.qf_reset,
@@ -719,6 +721,7 @@ struct PanelView: View {
             if let pw = x.pw {
                 quotaRow(title: L("周剩余"), pct: 100 - pw, reset: x.rw,
                          tint: Theme.codex, stale: x.pw_stale == true)
+                cycleSpendRow("codex")
             }
             // Reserve 常驻:额度行跟 5h/周排在一起;按模型紧跟额度行,不跟重置卡/plan隔开。
             if let q = x.reserveQuota, let pct = q.usedPercent {
@@ -1366,6 +1369,9 @@ struct PanelView: View {
                 // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset,
                          tint: Theme.grok, stale: g.stale == true)
+                if g.window != "month" {
+                    cycleSpendRow("grok")
+                }
                 // 周期结束后，分产品占比说的是上一个周期，不再列出
                 ForEach(periodEnded ? [] : g.products.filter { $0.pct != nil }) { product in
                     if let used = product.pct {
@@ -2626,6 +2632,38 @@ struct PanelView: View {
               ? L("窗口已在 %@ 重置，还没读到新窗口的额度", Fmt.reset(reset))
               : stale ? L("上次读到的额度，尚未刷新")
                       : (reset != nil ? L("%@ 后重置", Fmt.countdown(reset)) : ""))
+    }
+
+    /// 周额度行下面的「从上次重置到现在花了多少」。数据来自额度曲线页同一份周期统计，
+    /// 已合并所有设备；周期已经翻篇（还没刷到新周期）时不显示，免得把上周的钱算到这周。
+    @ViewBuilder
+    func cycleSpendRow(_ tool: String) -> some View {
+        if let cycle = cycleDetail.payload?.cycles.first(where: { $0.tool == tool && $0.current }),
+           cycle.end > Int(Date().timeIntervalSince1970),
+           let cost = cycle.costLabel {
+            HStack(spacing: 5) {
+                Text(L("本周期已花"))
+                    .font(.system(size: Theme.fontSize(11)))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Text(L("自 %@", Fmt.day(cycle.start)))
+                    .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                // 金额和 token 数不许折行，窄的时候让「自 xx-xx」去截断
+                Text("≈ \(cost)")
+                    .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+                    .fixedSize()
+                Text("· \(cycle.approx ? "≈" : "")\(Fmt.human(cycle.tokens))")
+                    .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize()
+            }
+            .help(Fmt.reset(cycle.start) + " → " + L("上次周额度重置到现在，所有设备合计，按 API 价折算"))
+        }
     }
 
     @ViewBuilder
