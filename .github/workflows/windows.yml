@@ -67,9 +67,6 @@ jobs:
       - name: Install frontend test dependencies
         working-directory: windows
         run: pnpm install --frozen-lockfile
-      - name: Windows card and sharing regression tests
-        working-directory: windows
-        run: pnpm test
       - name: Install crypto test dependency
         run: python -m pip install cryptography==50.0.1
       - name: Full test suite
