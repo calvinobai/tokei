@@ -88,6 +88,7 @@ struct PanelView: View {
     @AppStorage("showKimiCode") private var showKimiCode = true
     @AppStorage("showMuseCode") private var showMuseCode = true
     @AppStorage("showCmdCode") private var showCmdCode = true
+    @AppStorage("showCopilot") private var showCopilot = true
     @AppStorage("showDevin") private var showDevin = true
     @AppStorage("showMiniMax") private var showMiniMax = true
     /// 默认关闭：Grok 额度只读本地日志；开启后才用登录凭据请求实时账单接口。
@@ -126,7 +127,7 @@ struct PanelView: View {
             codebuddy: showCodeBuddy,
             deepseekHarness: showDeepSeekHarness,
             opencode: showOpenCode, qwencode: showQwenCode, kimicode: showKimiCode,
-            musecode: showMuseCode, cmdcode: showCmdCode,
+            musecode: showMuseCode, cmdcode: showCmdCode, copilot: showCopilot,
             devin: showDevin, minimax: showMiniMax
         )
     }
@@ -138,7 +139,7 @@ struct PanelView: View {
          showOpenClaw, showPi, showWorkBuddy, showWorkBuddyAI, showDeepSeekHarness,
          showCodeBuddy,
          showOpenCode, showQwenCode,
-         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showPrimeAgent, showDevin,
+         showQwenWork, showKimiCode, showMuseCode, showCmdCode, showCopilot, showPrimeAgent, showDevin,
          showMiniMax].filter { $0 }.count
     }
     private var hasMultipleDevices: Bool { store.syncEnabled && !store.peers.isEmpty }
@@ -436,6 +437,7 @@ struct PanelView: View {
         let zaiUsage = u.zai.usage?.ranges.get(sel) ?? TokenUsageRange()
         let qcr = u.qwencode.ranges.get(sel), kcr = u.kimicode.ranges.get(sel)
         let mcr = u.musecode.ranges.get(sel), ccr = u.cmdcode.ranges.get(sel)
+        let cpr = u.copilot.ranges.get(sel)
         let dvr = u.devin.ranges.get(sel), mmr = u.minimax.ranges.get(sel)
         return [
             ToolCardItem(id: "claude", name: "Claude", visible: showClaude,
@@ -576,6 +578,10 @@ struct PanelView: View {
                          tint: Theme.musecode, content: AnyView(tokenUsageBlock(title: "Muse Code", mcr, tint: Theme.musecode, modelsOpen: $museCodeModelsOpen, reasonIncludedInOutput: true, toolID: "musecode"))),
             ToolCardItem(id: "cmdcode", name: "Command Code", visible: showCmdCode, active: ccr.sessions > 0,
                          tint: Theme.cmdcode, content: AnyView(tokenUsageBlock(title: "Command Code", ccr, tint: Theme.cmdcode, modelsOpen: $cmdCodeModelsOpen, toolID: "cmdcode"))),
+            ToolCardItem(id: "copilot", name: "GitHub Copilot", visible: showCopilot,
+                         active: cpr.sessions > 0 || cpr.credits > 0,
+                         tint: Theme.copilot,
+                         content: AnyView(copilotOutputBlock(cpr))),
         ]
     }
 
@@ -1894,6 +1900,26 @@ struct PanelView: View {
 
     // MARK: - Token usage cards
     @ViewBuilder
+    func copilotOutputBlock(_ r: TokenUsageRange) -> some View {
+        VStack(alignment: .leading, spacing: 11) {
+            cardHead("GitHub Copilot", tint: Theme.copilot, sessions: r.sessions, toolID: "copilot")
+            if r.sessions > 0 || r.out + r.reason > 0 || r.credits > 0 {
+                CostHeadline(value: Fmt.human(r.out + r.reason), caption: "\(sel.label) · \(L("仅输出"))", tint: Theme.copilot)
+                let premium: [Metric] = r.credits > 0
+                    ? [.init("circle.hexagongrid.fill", "Premium Requests", Fmt.credits(r.credits))] : []
+                metricGrid([], hit: 0, extra: premium + [
+                    .init("arrow.up", L("输出"), Fmt.human(r.out)),
+                    .init("brain", L("推理"), Fmt.human(r.reason))
+                ], tint: Theme.copilot)
+                ForEach(r.models) { model in
+                    Text("\(L10n.data(model.name)) · \(L("仅输出")): \(Fmt.human(model.out + model.reason)) (\(L("输出")) \(Fmt.human(model.out)) · \(L("推理")) \(Fmt.human(model.reason)))")
+                        .font(.system(size: Theme.fontSize(10)))
+                        .foregroundStyle(Theme.tSecondary)
+                }
+            } else { emptyHint }
+        }
+    }
+
     func tokenUsageBlock(title: String, _ r: TokenUsageRange, tint: Color,
                          modelsOpen: Binding<Bool>, inclusiveIO: Bool = false,
                          showsCost: Bool = true, showsCredits: Bool = false,
@@ -3137,6 +3163,7 @@ struct PanelView: View {
                 settingsRow("Kimi Code", tint: Theme.kimicode, isOn: $showKimiCode)
                 settingsRow("Muse Code", tint: Theme.musecode, isOn: $showMuseCode)
                 settingsRow("Command Code", tint: Theme.cmdcode, isOn: $showCmdCode)
+                settingsRow("GitHub Copilot", tint: Theme.copilot, isOn: $showCopilot)
                 settingsRow("Devin", tint: Theme.devin, isOn: $showDevin)
                 settingsRow("MiniMax Code", tint: Theme.minimax, isOn: $showMiniMax)
             }
@@ -4285,7 +4312,7 @@ struct PanelView: View {
                          "zcode", "mimocode", "openclaw", "pi", "workbuddy", "workbuddy_ai",
                          "codebuddy",
                          "deepseek_harness",
-                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "prime_agent",
+                         "opencode", "qwencode", "qwenwork", "kimicode", "musecode", "cmdcode", "copilot", "prime_agent",
                          "devin", "minimax"]
                 .filter { json[$0] != nil }
                 .joined(separator: ",")

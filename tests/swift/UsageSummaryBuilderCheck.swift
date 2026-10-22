@@ -104,6 +104,31 @@ struct UsageSummaryBuilderCheck {
         try expect(miniMaxLine?.sessions == 5, "minimax line sessions")
         try expect(usage.minimax.quota.available, "minimax quota decodes alongside ranges")
 
+        var copilotUsage = usage
+        var copilotRanges = TokenUsageRanges.empty
+        copilotRanges.today = TokenUsageRange(in: 100, out: 13, cr: 50, cw: 10, reason: 7, cost: 0.5, credits: 2, sessions: 1, coverage: "output_only")
+        copilotUsage.copilot = TokenUsageStat(ranges: copilotRanges)
+        let coverageLabels: [(AppLanguage, String)] = [(.en, "Output only"), (.fr, "Sortie uniquement"), (.ja, "出力のみ"), (.ko, "출력만")]
+        for (language, label) in coverageLabels {
+            L10n.forcedLanguage = language
+            let localized = UsageSummaryBuilder.line(forToolID: "copilot", usage: copilotUsage, range: .today, visibility: allVisible)
+            try expect(L("仅输出") == label && localized?.extra?.hasPrefix(label) == true, "Copilot shared output-only translation")
+        }
+        L10n.forcedLanguage = .zh
+        let copilotLine = UsageSummaryBuilder.line(
+            forToolID: "copilot", usage: copilotUsage, range: .today, visibility: allVisible
+        )
+        try expect(copilotLine?.tokens == 20, "copilot known output excludes ambiguous input/cache")
+        try expect(copilotLine?.output == 13 && copilotLine?.reason == 7, "copilot exclusive output and reasoning")
+        try expect(copilotLine?.input == nil && copilotLine?.cacheRead == nil && copilotLine?.cacheWrite == nil && copilotLine?.cost == nil, "copilot unknown cells omitted")
+        try expect(copilotLine?.extra?.contains(L("仅输出")) == true, "copilot coverage is visible in overview and share")
+        try expect(copilotLine?.extra?.contains("2 Premium Requests") == true, "copilot premium requests remain shareable")
+        var hideCopilot = allVisible
+        hideCopilot.copilot = false
+        try expect(UsageSummaryBuilder.line(
+            forToolID: "copilot", usage: copilotUsage, range: .today, visibility: hideCopilot
+        ) == nil, "hidden copilot cannot enter share overview")
+
         // Cursor 卡片按 toolID "cursor" 取这一行。
         var cursorUsage = usage
         var cursorRanges = TokenUsageRanges.empty
@@ -218,6 +243,10 @@ struct UsageSummaryBuilderCheck {
 
         // Generated share images (footer + per-tool).
         try MainActor.assumeIsolated {
+            guard let copilotLine, let copilotPng = UsageShareImage.pngData(
+                line: copilotLine, range: .today, updated: nil
+            ) else { throw TestFailure.assertion("Copilot output-only share PNG missing") }
+            try expect(copilotPng.count > 800 && copilotPng.starts(with: [0x89, 0x50, 0x4E, 0x47]), "Copilot output-only share PNG invalid")
             guard let png = UsageShareImage.pngData(
                 usage: usage, range: .today, visibility: allVisible, updated: "更新 21:51:18"
             ) else {
@@ -279,7 +308,7 @@ struct UsageSummaryBuilderCheck {
 
         // 分享图按展示名取主题色；漏登记的工具会掉进默认灰（Muse/Kimi/Prime/DeepSeek 曾全灰）。
         let gray = NSColor(Theme.tTertiary)
-        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code", "Cursor", "Grok Bot", "z.ai"] {
+        for name in ["Prime Agent", "DeepSeek Harness", "Kimi Code", "Muse Code", "GitHub Copilot", "Cursor", "Grok Bot", "z.ai"] {
             let tint = NSColor(UsageShareImage.tint(for: name))
             try expect(!tint.isEqual(gray), "\(name) share tint must not be gray")
         }

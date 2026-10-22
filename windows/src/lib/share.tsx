@@ -52,6 +52,7 @@ const VISIBILITY_KEYS = {
   kimicode: "showKimiCode",
   musecode: "showMuseCode",
   cmdcode: "showCmdCode",
+  copilot: "showCopilot",
   devin: "showDevin",
   minimax: "showMiniMax",
 } as const;
@@ -245,7 +246,9 @@ function tokenToolLine(
   r: TokenUsageRange,
   { includesCost = true, includesCredits = false, reasonIncludedInOutput = false } = {},
 ): ShareLine {
-  const total = n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + (reasonIncludedInOutput ? 0 : n(r.reason));
+  const outputOnly = id === "copilot";
+  includesCost = includesCost && !outputOnly;
+  const total = outputOnly ? n(r.out) + n(r.reason) : n(r.in) + n(r.out) + n(r.cr) + n(r.cw) + (reasonIncludedInOutput ? 0 : n(r.reason));
   return {
     id,
     name,
@@ -254,13 +257,13 @@ function tokenToolLine(
     tokens: total,
     sessions: n(r.sessions),
     calls: null,
-    input: n(r.in),
+    input: outputOnly ? null : n(r.in),
     output: n(r.out),
-    cacheRead: n(r.cr),
-    cacheWrite: n(r.cw),
+    cacheRead: outputOnly ? null : n(r.cr),
+    cacheWrite: outputOnly ? null : n(r.cw),
     reason: positive(r.reason),
-    hit: positive(r.hit),
-    extra: includesCredits && n(r.credits) > 0 ? `${Fmt.credits(n(r.credits))} Credits` : null,
+    hit: outputOnly ? null : positive(r.hit),
+    extra: outputOnly ? (total > 0 || n(r.sessions) > 0 || n(r.credits) > 0 ? `${L("仅输出")}${n(r.credits) > 0 ? ` · ${Fmt.credits(n(r.credits))} Premium Requests` : ""}` : null) : includesCredits && n(r.credits) > 0 ? `${Fmt.credits(n(r.credits))} Credits` : null,
   };
 }
 
@@ -515,6 +518,7 @@ export function shareToolLines(usage: Usage, range: RangeKey, visibility: Record
   tokenTool("kimicode", "kimicode", "kimicode", "Kimi Code", { includesCost: false });
   tokenTool("musecode", "musecode", "musecode", "Muse Code", { reasonIncludedInOutput: true });
   tokenTool("cmdcode", "cmdcode", "cmdcode", "Command Code");
+  tokenTool("copilot", "copilot", "copilot", "GitHub Copilot", { includesCredits: true });
   tokenTool("devin", "devin", "devin", "Devin");
   tokenTool("minimax", "minimax", "minimax", "MiniMax Code");
   return lines;
@@ -554,6 +558,7 @@ const TINTS: Record<string, RGB> = {
   "Kimi Code": Theme.kimicode,
   "Muse Code": Theme.musecode,
   "Command Code": Theme.cmdcode,
+  "GitHub Copilot": Theme.copilot,
   "Prime Agent": Theme.primeAgent,
   "DeepSeek Harness": Theme.deepseekHarness,
   Devin: Theme.devin,
@@ -869,13 +874,15 @@ export function shareLineCells(line: ShareLine, tint: RGB): Cell[] {
   if ((line.cacheWrite ?? 0) > 0) cells.push(metricCell("square.stack.3d.up.fill", L("缓存写"), Fmt.human(line.cacheWrite ?? 0), tint));
   if ((line.reason ?? 0) > 0) cells.push(metricCell("brain", L("推理"), Fmt.human(line.reason ?? 0), tint));
   if ((line.calls ?? 0) > 0) cells.push(metricCell("waveform", L("调用"), String(line.calls), tint));
-  if (line.extra) cells.push(metricCell("bubble.left.and.bubble.right", L("信息"), line.extra, tint));
+  if (line.id === "copilot") {
+    if (line.extra?.includes(" Premium Requests")) cells.push(metricCell("bubble.left.and.bubble.right", "Premium Requests", line.extra.replace(`${L("仅输出")} · `, "").replace(" Premium Requests", ""), tint));
+  } else if (line.extra) cells.push(metricCell("bubble.left.and.bubble.right", L("信息"), line.extra, tint));
   return cells;
 }
 
 /** The same headline drives both measured height and rendered text. */
 export function shareLineHeadline(line: ShareLine, periodLabel: string): { value: string; caption: string } | null {
-  if ((line.tokens ?? 0) > 0) return { value: Fmt.human(line.tokens ?? 0), caption: L("%@ 总量", periodLabel) };
+  if ((line.tokens ?? 0) > 0) return { value: Fmt.human(line.tokens ?? 0), caption: line.id === "copilot" ? L("仅输出") : L("%@ 总量", periodLabel) };
   if ((line.calls ?? 0) > 0) return { value: Fmt.human(line.calls ?? 0), caption: L("%@ 响应", periodLabel) };
   return null;
 }

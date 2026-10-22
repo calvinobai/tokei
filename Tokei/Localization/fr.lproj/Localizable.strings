@@ -500,6 +500,7 @@
 "默认只读 ~/.grok 本地日志，不访问网络" = "Par défaut, lit uniquement les journaux locaux ~/.grok, aucun accès réseau";
 "默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。" = "Par défaut, lit uniquement les instantanés des journaux locaux Grok, sans accès réseau. Si activé, interroge l'API de facturation Grok avec les identifiants locaux.";
 "（当前范围无可复制的用量）" = "(Aucune consommation partageable dans cette plage)";
+"仅输出" = "Sortie uniquement";
 
 /* Windows 与性能指标 */
 "打开主窗口" = "Ouvrir la fenêtre principale";
