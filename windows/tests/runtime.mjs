@@ -38,11 +38,11 @@ export async function testRuntime() {
       load: file => server.ssrLoadModule("/" + file),
       pref: (key, value) => values.set(key, JSON.stringify(value)),
       clear: () => { values.clear(); values.set("appLanguage", JSON.stringify("zh")); },
-      async close() { await server.close(); restore(); await rm(cache, { recursive: true, force: true }); },
+      async close() { await server.close(); restore(); await rm(cache, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); },
     };
   } catch (error) {
     if (server) await server.close();
-    restore(); await rm(cache, { recursive: true, force: true });
+    restore(); await rm(cache, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     throw error;
   }
 }
