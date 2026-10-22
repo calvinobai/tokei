@@ -61,7 +61,10 @@ type VisibilityField = keyof typeof VISIBILITY_KEYS;
 /** 从偏好读出当前的显示开关（与 Mac 版 PanelView.toolVisibility 同一组键）。 */
 export function currentShareVisibility(): Record<string, boolean> {
   const result: Record<string, boolean> = {};
-  for (const key of Object.values(VISIBILITY_KEYS)) result[key] = getPref<boolean>(key, true);
+  for (const key of Object.values(VISIBILITY_KEYS)) {
+    const fallback = key !== "showCursor" && key !== "showZai";
+    result[key] = getPref<boolean>(key, fallback);
+  }
   return result;
 }
 
@@ -118,6 +121,8 @@ function isEmptyLine(line: ShareLine): boolean {
 const sum = (values: (number | null | undefined)[]) => values.reduce<number>((acc, v) => acc + (v ?? 0), 0);
 
 export function shareTotals(lines: ShareLine[]): ShareTotals {
+  // Provider account aggregates can describe the same requests as local logs.
+  lines = lines.filter((line) => line.id !== "cursor" && line.id !== "zai");
   return {
     cost_cny: sum(lines.map((l) => l.cost_cny)),
     cost: sum(lines.map((l) => l.cost)),
@@ -852,7 +857,7 @@ function drawShareHeader(
   return h;
 }
 
-function lineCells(line: ShareLine, tint: RGB): Cell[] {
+export function shareLineCells(line: ShareLine, tint: RGB): Cell[] {
   const cells: Cell[] = [];
   if (line.cost != null && (line.cost > 0 || (line.cost_cny ?? 0) > 0)) {
     cells.push(metricCell("dollarsign.circle", L("≈成本"), Fmt.nativeMoney(line.cost, line.cost_cny), tint));
@@ -864,7 +869,15 @@ function lineCells(line: ShareLine, tint: RGB): Cell[] {
   if ((line.cacheWrite ?? 0) > 0) cells.push(metricCell("square.stack.3d.up.fill", L("缓存写"), Fmt.human(line.cacheWrite ?? 0), tint));
   if ((line.reason ?? 0) > 0) cells.push(metricCell("brain", L("推理"), Fmt.human(line.reason ?? 0), tint));
   if ((line.calls ?? 0) > 0) cells.push(metricCell("waveform", L("调用"), String(line.calls), tint));
+  if (line.extra) cells.push(metricCell("bubble.left.and.bubble.right", L("信息"), line.extra, tint));
   return cells;
+}
+
+/** The same headline drives both measured height and rendered text. */
+export function shareLineHeadline(line: ShareLine, periodLabel: string): { value: string; caption: string } | null {
+  if ((line.tokens ?? 0) > 0) return { value: Fmt.human(line.tokens ?? 0), caption: L("%@ 总量", periodLabel) };
+  if ((line.calls ?? 0) > 0) return { value: Fmt.human(line.calls ?? 0), caption: L("%@ 响应", periodLabel) };
+  return null;
 }
 
 /** 一个工具的卡片（nativeToolCard）：色点 + 名称 + 会话数、总量、指标格。 */
@@ -884,10 +897,10 @@ function drawToolCard(
   const nameSize = compact ? 13 : 14;
   const sessions = line.sessions ?? 0;
   const headH = Math.max(lh(nameSize), sessions > 0 ? lh(10) + 3 : 0, 8);
-  const hasTokens = (line.tokens ?? 0) > 0;
-  const cells = lineCells(line, tint);
+  const headline = shareLineHeadline(line, periodLabel);
+  const cells = shareLineCells(line, tint);
   let h = pad + headH;
-  if (hasTokens) h += 10 + lh(fs(23));
+  if (headline) h += 10 + lh(fs(23));
   if (cells.length) h += 10 + drawGrid(null, cells, 0, 0, inner, 8, f);
   h += pad;
   if (!ctx) return h;
@@ -918,9 +931,9 @@ function drawToolCard(
   if (sessions > 0) sessionsCapsule(ctx, sessions, left + 15 + nameW + 7, headCenter, tint, f);
   cy += headH;
 
-  if (hasTokens) {
+  if (headline) {
     cy += 10;
-    cy += drawHeadline(ctx, Fmt.human(line.tokens ?? 0), L("%@ 总量", periodLabel), left, cy, inner, f);
+    cy += drawHeadline(ctx, headline.value, headline.caption, left, cy, inner, f);
   }
   if (cells.length) {
     cy += 10;

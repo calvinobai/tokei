@@ -120,6 +120,22 @@ struct UsageSummaryBuilderCheck {
         try expect(cursorLine?.calls == 42, "cursor line requests")
         try expect(cursorLine?.cost == 0.85, "cursor line cost")
 
+        // Provider account totals stay separately shareable and cannot inflate local totals.
+        var accountUsage = cursorUsage
+        accountUsage.zai.usage = TokenUsageStat(ranges: cursorRanges)
+        let localLines = UsageSummaryBuilder.toolLines(usage: usage, range: .today, visibility: allVisible)
+        let accountLines = UsageSummaryBuilder.toolLines(usage: accountUsage, range: .today, visibility: allVisible)
+        try expect(accountLines.contains { $0.id == "cursor" }, "cursor must remain independently shareable")
+        try expect(accountLines.contains { $0.id == "zai" }, "z.ai must remain independently shareable")
+        try expect(UsageSummaryBuilder.totals(for: accountLines) == UsageSummaryBuilder.totals(for: localLines),
+                   "provider account lines must not change any local overview total")
+        var hideAccounts = allVisible
+        hideAccounts.cursor = false
+        hideAccounts.zai = false
+        let hiddenAccounts = UsageSummaryBuilder.toolLines(usage: accountUsage, range: .today, visibility: hideAccounts)
+        try expect(!hiddenAccounts.contains { $0.id == "cursor" || $0.id == "zai" },
+                   "hidden account usage must be omitted")
+
         // Grok Bot 卡片按 toolID "grok-bot" 取这一行（支持回退显示的区间）。
         var grokBotUsage = usage
         var grokBotRanges = QoderRanges.empty

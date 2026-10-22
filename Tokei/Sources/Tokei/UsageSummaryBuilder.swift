@@ -83,7 +83,9 @@ enum UsageSummaryBuilder {
     }
 
     static func totals(for lines: [Line]) -> Totals {
-        Totals(
+        // Provider account aggregates may overlap the local tool records.
+        let lines = lines.filter { $0.id != "cursor" && $0.id != "zai" }
+        return Totals(
             cost_cny: lines.compactMap(\.cost_cny).reduce(0, +),
             cost: lines.compactMap(\.cost).reduce(0, +),
             tokens: lines.compactMap(\.tokens).reduce(0, +),
