@@ -5,6 +5,7 @@ import TokeiUpdateSecurity
 struct PanelView: View {
     @ObservedObject var store: Store
     @ObservedObject var layout: PanelLayoutContext = PanelLayoutContext()
+    @ObservedObject private var cycleDetail = QuotaDetailRepository.shared
     var scrollable = true
     /// 一次性量尺寸的 probe 从哪个页签画起；平时的面板总是从「今日」开始。
     static var initialRange: RangeKey = .today
@@ -43,6 +44,7 @@ struct PanelView: View {
     static var initialMode: PanelMode = .cards
     /// 离屏截图（--expand-models）时把按模型列表全部展开，方便检查明细行。
     static var expandModelsForShot = false
+    static var showCodexResetForShot = false
     @State private var mode: PanelMode = PanelView.initialMode
     @State private var trailProjects: [TrailProject]?
     enum PanelMode: String { case cards, quotaHistory, dashboard, projects, settings }
@@ -99,6 +101,7 @@ struct PanelView: View {
     @AppStorage("qwenWorkQuotaEnabled") private var qwenWorkQuotaEnabled = false
     /// 默认关闭：仅在 Desktop 缓存不可用时复用 Claude Code CLI 登录态查询官方额度。
     @AppStorage("claudeCLIQuotaEnabled") private var claudeCLIQuotaEnabled = false
+    @AppStorage(CodexResetMonitor.enabledKey) private var codexResetAnnouncementsEnabled = true
     @AppStorage(ActivityReporter.enabledKey) private var activityStatisticsEnabled = true
     /// 菜单栏额度来源（与显示卡片独立），每项是一个具体窗口。
     /// 只有历史上就默认开的 Claude 5h 与 Codex 周保持默认开，其余窗口默认关，避免抢占状态栏。
@@ -449,7 +452,8 @@ struct PanelView: View {
                          content: AnyView(claudeBlock(u.claude, cr))),
             ToolCardItem(id: "codex", name: "Codex", visible: showCodex,
                          active: xr.sessions > 0 || u.codex.p5 != nil || u.codex.pw != nil ||
-                             (u.codex.reset_cards?.count ?? 0) > 0,
+                             (u.codex.reset_cards?.count ?? 0) > 0 ||
+                             codexResetAnnouncementsEnabled || Self.showCodexResetForShot,
                          tint: Theme.codex, content: AnyView(codexBlock(u.codex, xr))),
             ToolCardItem(id: "gemini", name: "Gemini", visible: showGemini,
                          active: geminiRange.hasUsage,
@@ -661,6 +665,7 @@ struct PanelView: View {
                 if let q7 = c.q7 {
                     quotaRow(title: L("周 · 全部剩余"), pct: 100 - q7, reset: c.q7_reset,
                              tint: Theme.claude, stale: c.q7_stale == true)
+                    cycleSpendRow("claude", reset: c.q7_reset)
                 }
                 if let qf = c.qf {
                     quotaRow(title: L("周 · Fable 剩余"), pct: 100 - qf, reset: c.qf_reset,
@@ -721,6 +726,7 @@ struct PanelView: View {
             if let pw = x.pw {
                 quotaRow(title: L("周剩余"), pct: 100 - pw, reset: x.rw,
                          tint: Theme.codex, stale: x.pw_stale == true)
+                cycleSpendRow("codex", reset: x.rw)
             }
             // Reserve 常驻:额度行跟 5h/周排在一起;按模型紧跟额度行,不跟重置卡/plan隔开。
             if let q = x.reserveQuota, let pct = q.usedPercent {
@@ -759,6 +765,10 @@ struct PanelView: View {
                     updated: nil,
                     tint: Theme.codex
                 )
+            }
+            if codexResetAnnouncementsEnabled || Self.showCodexResetForShot {
+                thinDivider
+                CodexResetAnnouncementView(monitor: .shared, live: scrollable && store.popoverVisible)
             }
         }
     }
@@ -1368,6 +1378,9 @@ struct PanelView: View {
                 // 总剩余：同一周额度池。分产品 usagePercent 是该产品在池内的占用占比，不是独立额度剩余。
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset,
                          tint: Theme.grok, stale: g.stale == true)
+                if g.window != "month" {
+                    cycleSpendRow("grok", reset: g.reset)
+                }
                 // 周期结束后，分产品占比说的是上一个周期，不再列出
                 ForEach(periodEnded ? [] : g.products.filter { $0.pct != nil }) { product in
                     if let used = product.pct {
@@ -2630,6 +2643,37 @@ struct PanelView: View {
                       : (reset != nil ? L("%@ 后重置", Fmt.countdown(reset)) : ""))
     }
 
+    /// 周额度行下面的「从上次重置到现在花了多少」。数据来自额度曲线页同一份周期统计，
+    /// 已合并所有设备；周期已经翻篇（还没刷到新周期）时不显示，免得把上周的钱算到这周。
+    @ViewBuilder
+    func cycleSpendRow(_ tool: String, reset: Int?) -> some View {
+        if let cycle = cycleDetail.payload?.currentCycle(for: tool, endingAt: reset),
+           let cost = cycle.costLabel {
+            HStack(spacing: 5) {
+                Text(L("本周期已花"))
+                    .font(.system(size: Theme.fontSize(11)))
+                    .foregroundStyle(Theme.tSecondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                Text(L("自 %@", Fmt.day(cycle.start)))
+                    .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                // 金额和 token 数不许折行，窄的时候让「自 xx-xx」去截断
+                Text("≈ \(cost)")
+                    .font(.system(size: Theme.fontSize(12), weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.tPrimary)
+                    .fixedSize()
+                Text("· \(cycle.approx ? "≈" : "")\(Fmt.human(cycle.tokens))")
+                    .font(.system(size: Theme.fontSize(9.5), design: .monospaced))
+                    .foregroundStyle(Theme.tTertiary)
+                    .fixedSize()
+            }
+            .help(Fmt.reset(cycle.start) + " → " + L("上次周额度重置到现在，所有设备合计，按 API 价折算"))
+        }
+    }
+
     @ViewBuilder
     func claudeQuotaStatus(_ stat: ClaudeStat) -> some View {
         // 读数的来源是一起刷新的：只要还有一个窗口是新的，其余过期的只是窗口翻篇（行上写「已重置」）
@@ -2799,7 +2843,7 @@ struct PanelView: View {
     }
 
     @ObservedObject private var updater = Updater.shared
-    @ObservedObject private var loginItem = LoginItemManager.shared
+    @ObservedObject private var loginItem = Shot.isOffline ? Shot.offlineLoginItem : LoginItemManager.shared
     @State private var priceUpdating = false
     @State private var priceResult = ""
     @State private var debugRunning = false
@@ -3471,6 +3515,14 @@ struct PanelView: View {
 
             thinDivider
 
+            settingsToggleRow(L("Codex 额外重置动态"), isOn: $codexResetAnnouncementsEnabled)
+            Text(L("默认开启，可随时关闭。每 10 分钟从 AIHOT 获取公开重置公告，不发送登录凭据或用量。预计时间仅供参考，不预测未公布的下一次重置；个人额度以 Codex 为准。"))
+                .font(.system(size: Theme.fontSize(8.5)))
+                .foregroundStyle(Theme.tTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            thinDivider
+
             settingsToggleRow(L("Grok 实时额度查询"), isOn: $grokLiveQuotaEnabled)
             Text(L("默认只读本机 Grok 日志中的额度快照，不访问网络。开启后才会用本地登录凭据请求 Grok 账单接口，以便拿到最新剩余额度。"))
                 .font(.system(size: Theme.fontSize(8.5)))
@@ -3518,6 +3570,9 @@ struct PanelView: View {
         }
         .onChange(of: claudeCLIQuotaEnabled) { _ in
             store.refresh()
+        }
+        .onChange(of: codexResetAnnouncementsEnabled) { enabled in
+            CodexResetMonitor.shared.refresh(enabled: enabled && showCodex)
         }
         .onChange(of: grokLiveQuotaEnabled) { enabled in
             Self.setGrokLiveQuotaEnabled(enabled)

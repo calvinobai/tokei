@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import GrokBotBridge
+import ServiceManagement
 
 final class Store: ObservableObject {
     @Published var usage: Usage?
@@ -24,8 +25,9 @@ final class Store: ObservableObject {
     /// 两者长得一模一样，但一个是结论，一个只是还没轮到。
     @Published var isRefreshing = false
 
-    let syncManager = SyncManager()
-    let quotaHistory = QuotaHistoryStore.shared
+    lazy var syncManager = SyncManager()
+    let quotaHistory: QuotaHistoryStore
+    private let offline: Bool
     let keepAwake = KeepAwake()
     let sitReminder = SitReminder()
     var autoSyncTimer: Timer?
@@ -46,6 +48,14 @@ final class Store: ObservableObject {
     /// 固定 10 秒会让刷新首尾相接，还会和自己抢扫描缓存的文件锁，越刷越慢。
     private(set) var lastRefreshDuration: TimeInterval = 0
 
+    init(offline: Bool = false) {
+        self.offline = offline
+        quotaHistory = offline ? QuotaHistoryStore(
+            fileURL: FileManager.default.temporaryDirectory
+                .appendingPathComponent("tokei-shot-\(UUID().uuidString)/quota_history.json")
+        ) : .shared
+    }
+
     func applyDisplayMode(updateStatusTitle: Bool = true) {
         usage = (syncEnabled && showAllDevices) ? (allDevicesUsage ?? localUsage) : localUsage
         if updateStatusTitle {
@@ -54,6 +64,7 @@ final class Store: ObservableObject {
     }
 
     func primeCachedUsage() {
+        guard !offline else { return }
         guard usage == nil, let local = DataLoader.loadCachedUsage() else { return }
         localUsage = local
         var allDevices = local
@@ -71,6 +82,10 @@ final class Store: ObservableObject {
     }
 
     func refresh(prewarmQuotaDetail: Bool = false) {
+        guard !offline else { return }
+        CodexResetMonitor.shared.refresh(enabled:
+            CodexResetMonitor.isEnabled() &&
+            UserDefaults.standard.object(forKey: "showCodex") as? Bool != false)
         quotaDetailPrewarmPending = quotaDetailPrewarmPending || prewarmQuotaDetail
         if refreshInFlight {
             refreshPending = true
@@ -90,6 +105,7 @@ final class Store: ObservableObject {
     /// 取数本身很便宜——脚本会复用 60 秒内的 last_usage.json，实测 3 秒出头，
     /// 而且 QuotaDetailRepository 自己有 refreshing 门闩挡重入，不需要外面再挡一层。
     func loadQuotaDetail() {
+        guard !offline else { return }
         QuotaDetailRepository.shared.load(force: true)
     }
 
@@ -202,6 +218,7 @@ final class Store: ObservableObject {
     }
 
     func doSync() {
+        guard !offline else { return }
         guard syncEnabled, !syncing else { return }
         guard let cfg = syncManager.config else {
             syncStatus = L("同步配置不可用")
@@ -242,6 +259,7 @@ final class Store: ObservableObject {
     }
 
     func startAutoSync(minutes: Int) {
+        guard !offline else { return }
         stopAutoSync()
         guard syncEnabled else { return }
         autoSyncTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60),
@@ -668,9 +686,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 // 加 --usage /path/usage.json 时直接渲染这份数据，不跑采集器——用来看过期、空态这类
 // 平时不好凑出来的状态。
 enum Shot {
+    static var isOffline: Bool {
+        CommandLine.arguments.contains("--usage") &&
+            (CommandLine.arguments.contains("--shot") || CommandLine.arguments.contains("--share-shot"))
+    }
+
+    private final class OfflineLoginItemService: LoginItemServicing {
+        var status: SMAppService.Status { .notRegistered }
+        var diagnosticName: String { "offline-shot" }
+        func register() throws {}
+        func unregister() throws {}
+    }
+
+    @MainActor static let offlineLoginItem = LoginItemManager(
+        service: OfflineLoginItemService(),
+        defaults: UserDefaults(suiteName: "com.tokei.offline-shot.\(UUID().uuidString)")!
+    )
+
     static func loadUsage() -> Usage? {
-        if let idx = CommandLine.arguments.firstIndex(of: "--usage"),
-           CommandLine.arguments.count > idx + 1 {
+        if let idx = CommandLine.arguments.firstIndex(of: "--usage") {
+            guard CommandLine.arguments.count > idx + 1,
+                  !CommandLine.arguments[idx + 1].hasPrefix("--") else {
+                fputs("Tokei --usage: missing fixture path\n", stderr)
+                return nil
+            }
             let url = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
             do {
                 return try Usage.decode(from: Data(contentsOf: url))
@@ -692,7 +731,17 @@ enum Shot {
         OffscreenRender.suppressTips = true
         defer { OffscreenRender.suppressTips = false }
         MainActor.assumeIsolated {
-            let store = Store()
+            if let idx = CommandLine.arguments.firstIndex(of: "--reset-feed"),
+               CommandLine.arguments.count > idx + 1 {
+                do {
+                    let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[idx + 1]))
+                    CodexResetMonitor.shared.usePreview(try CodexResetFeed.decode(data))
+                    PanelView.showCodexResetForShot = true
+                } catch {
+                    fputs("Tokei --reset-feed: \(error)\n", stderr)
+                }
+            }
+            let store = Store(offline: isOffline)
             store.usage = usage
             store.lastUpdated = L("预览")
             let content = PanelView(store: store, scrollable: false)
@@ -828,6 +877,27 @@ if let idx = CommandLine.arguments.firstIndex(of: "--mode"),
         "quota": .quotaHistory, "projects": .projects,
     ]
     PanelView.initialMode = modes[CommandLine.arguments[idx + 1]] ?? .cards
+}
+
+// 只读 fixture 只能用于卡片/额度离屏截图，不进入常规应用启动路径。
+let offlineShot = Shot.isOffline
+QuotaDetailRepository.fixtureMode = offlineShot
+if let idx = CommandLine.arguments.firstIndex(of: "--quota-detail-json") {
+    guard offlineShot, CommandLine.arguments.contains("--shot"),
+          CommandLine.arguments.count > idx + 1,
+          !CommandLine.arguments[idx + 1].hasPrefix("--"),
+          PanelView.initialMode == .cards || PanelView.initialMode == .quotaHistory else {
+        fputs("Tokei --quota-detail-json requires --usage <file> --shot <file> and cards/quota mode\n", stderr)
+        exit(64)
+    }
+    let url = URL(fileURLWithPath: CommandLine.arguments[idx + 1])
+    do {
+        _ = try JSONDecoder().decode(QuotaDetailPayload.self, from: Data(contentsOf: url))
+        QuotaDetailRepository.fixtureURL = url
+    } catch {
+        fputs("Tokei --quota-detail-json: \(error)\n", stderr)
+        exit(65)
+    }
 }
 
 if CommandLine.arguments.contains("--expand-models") {
