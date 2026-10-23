@@ -15,7 +15,8 @@
 # API Key 查询对应官方/自托管接口。Antigravity 额度只探测已运行的 127.0.0.1 服务。
 # --update-prices 仍只在用户显式触发时更新价格表。
 #   Claude Code: ~/.claude/projects/<proj>/<session>.jsonl  (assistant 行 message.usage,增量)
-#   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl (token_count 事件,含额度)
+#   Codex:       ~/.codex/{sessions,archived_sessions}/**/rollout-*.jsonl[.zst] (token_count 事件,含额度;
+#                官方 legacy_to_paginated_v1 迁移会把旧 rollout 压缩成 .jsonl.zst)
 #   Pi:          ~/.pi/agent/sessions/**/*.jsonl + ~/.omp/agent/sessions/**/*.jsonl
 #   WorkBuddy:   ~/.workbuddy/projects/**/*.jsonl (逐次模型调用 message.usage)
 #   WorkBuddy AI:~/.workbuddy-ai/projects/**/*.jsonl (国际版,同结构独立统计)
@@ -966,7 +967,7 @@ _SCAN_CACHE_FILE = _DEFAULT_SCAN_CACHE_FILE
 _SCAN_CACHE_VERSION = 21
 _SCAN_CACHE_MIGRATABLE_VERSION = 19
 _CODEX_EVENT_CACHE_SUFFIX = ".codex-events"
-_CODEX_PARSER_VERSION = 8
+_CODEX_PARSER_VERSION = 9
 _CODEX_ACCOUNTING_VERSION = 7
 
 
@@ -4130,6 +4131,92 @@ _CODEX_OUTPUT_ITEM = re.compile(rb'"item":\{"type":"(Reasoning|AgentMessage)"')
 _CODEX_ITEM_STARTED = re.compile(rb'"started_at_ms":(\d+)')
 
 
+class _CodexZstdStream:
+    """Normalize decoder errors and own an optional CLI decoder process."""
+
+    def __init__(self, inner, process=None):
+        self._inner = inner
+        self._process = process
+
+    def _read(self, method, n):
+        try:
+            data = getattr(self._inner, method)(n)
+            if self._process is not None and (not data and n != 0 or n < 0):
+                status = self._process.wait(timeout=1)
+                if status:
+                    raise OSError(f"zstd decoder exited with status {status}")
+            return data
+        except OSError:
+            raise
+        except Exception as exc:
+            raise OSError(str(exc)) from exc
+
+    def read(self, n=-1):
+        return self._read("read", n)
+
+    def readline(self, n=-1):
+        return self._read("readline", n)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        try:
+            self._inner.close()
+        finally:
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1)
+
+
+def _open_codex_rollout(path):
+    """Open a rollout without rewriting the compressed source."""
+    path = os.fspath(path)
+    if not path.endswith(".zst"):
+        return open(path, "rb", buffering=0)
+    stream = None
+    try:
+        from compression import zstd as _zstd  # Python 3.14+
+        stream = _zstd.open(path, "rb")
+    except Exception:
+        stream = None
+    if stream is None:
+        source = None
+        try:
+            import io
+            import zstandard as _zstandard
+            source = open(path, "rb", buffering=0)
+            stream = io.BufferedReader(
+                _zstandard.ZstdDecompressor().stream_reader(source))
+        except Exception:
+            if source is not None:
+                source.close()
+            stream = None
+    if stream is not None:
+        return _CodexZstdStream(stream)
+    import shutil
+    candidates = ["/opt/homebrew/bin/zstd", "/usr/local/bin/zstd", "/usr/bin/zstd"]
+    path_exe = shutil.which("zstd")
+    if path_exe:
+        candidates.append(path_exe)
+    for exe in dict.fromkeys(candidates):
+        if not os.path.exists(exe):
+            continue
+        try:
+            process = subprocess.Popen([exe, "-dc", "--", path],
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, **_NO_WINDOW)
+        except OSError:
+            continue
+        return _CodexZstdStream(process.stdout, process)
+    raise OSError("no zstd decoder available")
+
+
 def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
                               model_limit=64 * 1024, start_offset=0, end_offset=None):
     """Yield model changes and token records without buffering unrelated large JSONL lines.
@@ -4143,7 +4230,7 @@ def _iter_codex_usage_records(path, chunk_size=64 * 1024, header_limit=1024,
     candidate = None
     kind = None
 
-    with open(path, "rb", buffering=0) as fh:
+    with _open_codex_rollout(path) as fh:
         if start_offset:
             fh.seek(start_offset)
         while True:
@@ -4328,7 +4415,7 @@ def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
     只认 session_meta 那一行：按 cwd 匹配会一路扫到后面的大事件行上去,
     几千个会话累计起来就是几十秒。"""
     try:
-        with open(path, "rb", buffering=0) as fh:
+        with _open_codex_rollout(path) as fh:
             for _ in range(max_lines):
                 line = fh.readline(max_line_bytes)
                 if not line:
@@ -4350,7 +4437,7 @@ def _codex_session_cwd(path, max_lines=8, max_line_bytes=128 * 1024):
 
 def _codex_session_meta(path, max_lines=20, max_line_bytes=2 * 1024 * 1024):
     try:
-        with open(path, "rb", buffering=0) as fh:
+        with _open_codex_rollout(path) as fh:
             for _ in range(max_lines):
                 line = fh.readline(max_line_bytes)
                 if not line:
@@ -4389,7 +4476,10 @@ def _codex_rollout_files():
     files = []
     seen = set()
     for root in roots:
-        for path in sorted(glob.glob(os.path.join(root, "**", "rollout-*.jsonl"), recursive=True)):
+        paths = glob.glob(os.path.join(root, "**", "rollout-*.jsonl"), recursive=True)
+        # Codex Desktop compacts old rollouts to zstd ('legacy_to_paginated_v1').
+        paths += glob.glob(os.path.join(root, "**", "rollout-*.jsonl.zst"), recursive=True)
+        for path in sorted(paths):
             real = _realpath_in_dir(path)
             key = os.path.normcase(real)
             if key not in seen and os.path.isfile(real):
@@ -4522,6 +4612,7 @@ def scan_codex(bounds, cache, local_only=False):
         except OSError:
             continue
         mtime, size = st.st_mtime, st.st_size
+        is_zst = f.endswith(".zst")
         try:
             is_active = active_root is not None and os.path.commonpath((f, active_root)) == active_root
         except ValueError:
@@ -4542,10 +4633,12 @@ def scan_codex(bounds, cache, local_only=False):
                 or entry.get("parser_version") != _CODEX_PARSER_VERSION
                 or entry.get("accounting_version") != _CODEX_ACCOUNTING_VERSION
                 or not event_cache_ready or f in perf_backfill):
-            complete_offset = _codex_complete_offset(f, size)
+            # Compressed rollouts are immutable snapshots: always parse them whole
+            # (offsets would refer to compressed bytes, not records).
+            complete_offset = None if is_zst else _codex_complete_offset(f, size)
             file_id = f"{st.st_dev}:{st.st_ino}"
             append_from = None
-            if (isinstance(entry, dict) and f not in perf_backfill
+            if (isinstance(entry, dict) and f not in perf_backfill and not is_zst
                     and entry.get("parser_version") == _CODEX_PARSER_VERSION
                     and entry.get("accounting_version") == _CODEX_ACCOUNTING_VERSION):
                 old_offset = int(entry.get("parsed_size", 0) or 0)
@@ -4787,7 +4880,8 @@ def scan_codex(bounds, cache, local_only=False):
                 "perf_v": (_CODEX_PERF_VERSION if append_from is None
                            else (entry.get("perf_v") if isinstance(entry, dict) else None)),
                 "file_id": file_id, "parsed_size": complete_offset,
-                "parsed_guard": _codex_offset_guard(f, complete_offset),
+                "parsed_guard": (None if complete_offset is None
+                                 else _codex_offset_guard(f, complete_offset)),
                 "event_cache_size": event_cache_size,
                 "event_count": metadata["event_count"],
                 "first_keys": metadata["first_keys"],
