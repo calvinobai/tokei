@@ -36,7 +36,9 @@ class CodexZstdRegressionTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="tokei-codex-zstd-")
         self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        # The scanner keys files by canonical paths (/var aliases on macOS;
+        # short temporary-directory names on Windows).
+        self.root = Path(temporary.name).resolve()
         self.sessions = self.root / "sessions"
         self.sessions.mkdir()
         self.rollout = self.sessions / "rollout-fixture.jsonl.zst"
@@ -194,7 +196,9 @@ class CodexZstdRegressionTests(unittest.TestCase):
             with USAGE._open_codex_rollout(self.rollout) as stream:
                 self.assertEqual(stream.read(), self.payload())
         command = launch.call_args.args[0]
-        self.assertEqual(command[0], str(alias))
+        # shutil.which may return the PATHEXT spelling zstd.EXE on Windows.
+        # Keep checking the PATH alias location using filesystem case rules.
+        self.assertEqual(os.path.normcase(command[0]), os.path.normcase(str(alias)))
         self.assertEqual(command[1:], ["-dc", "--", str(self.rollout)])
 
     def test_raw_library_reader_is_buffered_for_metadata(self):
