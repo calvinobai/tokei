@@ -32,6 +32,8 @@ export async function testRuntime() {
       root: fileURLToPath(new URL("../", import.meta.url)),
       cacheDir: cache,
       logLevel: "error",
+      // SSR assertions need no client optimizer; avoid background output after close.
+      optimizeDeps: { noDiscovery: true, include: [] },
       server: { middlewareMode: true, hmr: false, ws: false, watch: null },
     });
     return {
