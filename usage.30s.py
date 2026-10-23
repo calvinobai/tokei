@@ -18351,12 +18351,12 @@ def _quota_cost_value(value):
 def _quota_day_cost(tools, tool, day_key):
     entry = (tools.get(tool) or {}).get(day_key)
     if not isinstance(entry, dict):
-        return 0.0
-    return _quota_cost_value(entry.get("cost")) or 0.0
+        return None
+    return _quota_cost_value(entry.get("cost"))
 
 
 def _quota_window_tokens(devices, tool, key, start, end, self_events):
-    """Return (tokens, per-device tokens, token approximation, estimated USD cost).
+    """Return (tokens, per-device tokens, token approximation, optional USD estimate).
 
     Full days use the retained ledger. A partial local day uses cached request
     costs only when its complete token/cost coverage agrees with that ledger.
@@ -18387,11 +18387,18 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
     per_device = {}
     approx = False
     cost = 0.0
+    cost_known = True
     for name, tools, _snapshot, daily in devices:
         own = name == _QUOTA_SELF_DEVICE and self_events is not None
         total = sum(int((daily.get(day) or {}).get(key, 0)) for day in interior)
-        cost += sum(_quota_day_cost(tools, tool, day) for day in interior
-                    if int((daily.get(day) or {}).get(key, 0)) > 0)
+        for day in interior:
+            if int((daily.get(day) or {}).get(key, 0)) <= 0:
+                continue
+            day_cost = _quota_day_cost(tools, tool, day)
+            if day_cost is None:
+                cost_known = False
+            else:
+                cost += day_cost
         for day in boundary:
             bounds = _quota_day_hour_bounds(day, start, end)
             if bounds is None:
@@ -18406,8 +18413,11 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
                 amount, guessed = _quota_peer_boundary(tools, tool, day, bounds, day_total)
                 approx = approx or (guessed and amount > 0)
             total += amount
-            if day_total > 0:
+            if day_total > 0 and amount > 0:
                 day_cost = _quota_day_cost(tools, tool, day)
+                if day_cost is None:
+                    cost_known = False
+                    continue
                 complete_cost = (complete_tokens and day not in missing_cost
                                  and math.isclose(self_day_costs.get(day, 0), day_cost,
                                                   rel_tol=1e-9, abs_tol=0.0001))
@@ -18416,7 +18426,9 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
                 else:
                     cost += day_cost * max(0.0, min(amount / day_total, 1.0))
         per_device[name] = total
-    return sum(per_device.values()), per_device, approx, round(_quota_cost_value(cost) or 0.0, 4)
+    # Unknown or invalid amounts remain absent, rather than suggesting free usage.
+    final_cost = round(cost, 4) if cost_known and math.isfinite(cost) else None
+    return sum(per_device.values()), per_device, approx, final_cost
 
 
 def _quota_tool_reading(source, tool):

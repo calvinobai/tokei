@@ -660,7 +660,7 @@ struct PanelView: View {
                 if let q7 = c.q7 {
                     quotaRow(title: L("周 · 全部剩余"), pct: 100 - q7, reset: c.q7_reset,
                              tint: Theme.claude, stale: c.q7_stale == true)
-                    cycleSpendRow("claude")
+                    cycleSpendRow("claude", reset: c.q7_reset)
                 }
                 if let qf = c.qf {
                     quotaRow(title: L("周 · Fable 剩余"), pct: 100 - qf, reset: c.qf_reset,
@@ -721,7 +721,7 @@ struct PanelView: View {
             if let pw = x.pw {
                 quotaRow(title: L("周剩余"), pct: 100 - pw, reset: x.rw,
                          tint: Theme.codex, stale: x.pw_stale == true)
-                cycleSpendRow("codex")
+                cycleSpendRow("codex", reset: x.rw)
             }
             // Reserve 常驻:额度行跟 5h/周排在一起;按模型紧跟额度行,不跟重置卡/plan隔开。
             if let q = x.reserveQuota, let pct = q.usedPercent {
@@ -1370,7 +1370,7 @@ struct PanelView: View {
                 quotaRow(title: title, pct: 100 - pct, reset: g.reset,
                          tint: Theme.grok, stale: g.stale == true)
                 if g.window != "month" {
-                    cycleSpendRow("grok")
+                    cycleSpendRow("grok", reset: g.reset)
                 }
                 // 周期结束后，分产品占比说的是上一个周期，不再列出
                 ForEach(periodEnded ? [] : g.products.filter { $0.pct != nil }) { product in
@@ -2637,9 +2637,8 @@ struct PanelView: View {
     /// 周额度行下面的「从上次重置到现在花了多少」。数据来自额度曲线页同一份周期统计，
     /// 已合并所有设备；周期已经翻篇（还没刷到新周期）时不显示，免得把上周的钱算到这周。
     @ViewBuilder
-    func cycleSpendRow(_ tool: String) -> some View {
-        if let cycle = cycleDetail.payload?.cycles.first(where: { $0.tool == tool && $0.current }),
-           cycle.end > Int(Date().timeIntervalSince1970),
+    func cycleSpendRow(_ tool: String, reset: Int?) -> some View {
+        if let cycle = cycleDetail.payload?.currentCycle(for: tool, endingAt: reset),
            let cost = cycle.costLabel {
             HStack(spacing: 5) {
                 Text(L("本周期已花"))
@@ -2835,7 +2834,7 @@ struct PanelView: View {
     }
 
     @ObservedObject private var updater = Updater.shared
-    @ObservedObject private var loginItem = LoginItemManager.shared
+    @ObservedObject private var loginItem = Shot.isOffline ? Shot.offlineLoginItem : LoginItemManager.shared
     @State private var priceUpdating = false
     @State private var priceResult = ""
     @State private var debugRunning = false

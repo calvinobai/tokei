@@ -279,10 +279,18 @@ class QuotaWindowCostTests(unittest.TestCase):
         for raw in (float("nan"), float("inf"), "NaN", "-Infinity", -3, True, 10 ** 400):
             with self.subTest(kind=type(raw).__name__):
                 tools = {"claude": {"2026-03-02": {"in": 10, "cost": raw}}}
-                self.assertEqual(USAGE._quota_day_cost(tools, "claude", "2026-03-02"), 0.0)
+                self.assertIsNone(USAGE._quota_day_cost(tools, "claude", "2026-03-02"))
                 start, end = USAGE._quota_local_day_range("2026-03-02")
                 *_, cost = USAGE._quota_window_tokens(self._devices(tools), "claude", "c", start, end, None)
-                self.assertEqual(json.loads(json.dumps({"cost": cost}, allow_nan=False))["cost"], 0.0)
+                self.assertIsNone(json.loads(json.dumps({"cost": cost}, allow_nan=False))["cost"])
+
+    def test_missing_positive_usage_cost_is_unknown_not_free(self):
+        start, end = USAGE._quota_local_day_range("2026-03-02")
+        for tokens, expected in ((10, None), (0, 0.0)):
+            with self.subTest(tokens=tokens):
+                tools = {"claude": {"2026-03-02": {"in": tokens}}}
+                *_, cost = USAGE._quota_window_tokens(self._devices(tools), "claude", "c", start, end, None)
+                self.assertEqual(cost, expected)
 
     def test_complete_local_events_use_request_costs_for_mixed_day(self):
         devices, events, start, end = self._own_case([(6, 300, 9.0), (18, 100, 2.0)])

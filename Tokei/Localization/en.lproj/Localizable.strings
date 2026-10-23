@@ -600,7 +600,7 @@
 "平均输出速度（含等待）" = "Avg output speed (incl. wait)";
 "平均速度（含等待）" = "Avg speed (incl. wait)";
 "输出 token 总数 ÷ 记录耗时；%@ 个请求中，%@ 个包含首字等待，无法还原纯生成速度" = "Total output tokens ÷ recorded duration; of %@ requests, %@ include first-token wait, so pure generation speed is unavailable";
-"按 API 价折算的成本，首尾不满一天的部分按 token 占比分摊" = "Estimated at API prices; partial days at the cycle edges are split by token share";
+"按 API 价估算；缺少完整明细时，周期首尾按 token 占比分摊" = "Estimated at API prices; cycle edges are split by token share when complete event details are unavailable";
 "这个周期约花了 %@" = "About %@ this cycle";
 "本周期已花" = "This cycle";
 "上次周额度重置到现在，所有设备合计，按 API 价折算" = "Since the last weekly quota reset, all devices combined, at API prices";
