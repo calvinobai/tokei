@@ -6,6 +6,7 @@ import ServiceManagement
 
 final class Store: ObservableObject {
     @Published var usage: Usage?
+    @Published var localOutputThroughput = LocalOutputThroughput()
     @Published var localUsage: Usage?
     @Published var allDevicesUsage: Usage?
     @Published var lastUpdated: String = L("加载中…")
@@ -137,6 +138,7 @@ final class Store: ObservableObject {
             self.lastRefreshDuration = Date().timeIntervalSince(startedAt)
             self.retryCount = 0
             self.loadError = nil
+            self.localOutputThroughput.observe(local.localOutputCounters)
             self.localUsage = local
             var allDevices = local
             if self.syncEnabled {
