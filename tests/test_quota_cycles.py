@@ -255,6 +255,67 @@ class QuotaWindowCostTests(unittest.TestCase):
         self.assertEqual(cost, 0.0)
 
 
+    def _own_case(self, rows, *, day_cost=11.0, day_tokens=400):
+        day = "2026-03-02"
+        day_start, day_end = USAGE._quota_local_day_range(day)
+        cached = [{"mid": str(i), "timestamp": USAGE.datetime.fromtimestamp(day_start + hour * 3600).astimezone().isoformat(),
+                   "in": tokens, **({"cost": cost} if cost is not None else {})}
+                  for i, (hour, tokens, cost) in enumerate(rows)]
+        events = USAGE._quota_claude_events({"claude": {"fixture": {"events": cached}}})
+        hours = [0] * 24
+        for hour, tokens, _cost in rows:
+            hours[hour] += tokens
+        tools = {"claude": {day: {"in": day_tokens, "cost": day_cost, "hours": hours}}}
+        devices = [(USAGE._QUOTA_SELF_DEVICE, tools, None, USAGE._quota_daily_from_tools(tools))]
+        return devices, events, day_start, day_end
+
+    def test_full_zero_token_day_does_not_add_cost(self):
+        tools = {"claude": {"2026-03-02": {"cost": 3.0}}}
+        start, end = USAGE._quota_local_day_range("2026-03-02")
+        *_, cost = USAGE._quota_window_tokens(self._devices(tools), "claude", "c", start, end, None)
+        self.assertEqual(cost, 0.0)
+
+    def test_invalid_day_costs_cannot_poison_cycle_json(self):
+        for raw in (float("nan"), float("inf"), "NaN", "-Infinity", -3, True, 10 ** 400):
+            with self.subTest(kind=type(raw).__name__):
+                tools = {"claude": {"2026-03-02": {"in": 10, "cost": raw}}}
+                self.assertEqual(USAGE._quota_day_cost(tools, "claude", "2026-03-02"), 0.0)
+                start, end = USAGE._quota_local_day_range("2026-03-02")
+                *_, cost = USAGE._quota_window_tokens(self._devices(tools), "claude", "c", start, end, None)
+                self.assertEqual(json.loads(json.dumps({"cost": cost}, allow_nan=False))["cost"], 0.0)
+
+    def test_complete_local_events_use_request_costs_for_mixed_day(self):
+        devices, events, start, end = self._own_case([(6, 300, 9.0), (18, 100, 2.0)])
+        tokens, _, _, cost = USAGE._quota_window_tokens(devices, "claude", "c", start + 12 * 3600, end, events)
+        self.assertEqual(tokens, 100)
+        self.assertEqual(cost, 2.0)
+
+    def test_partial_or_legacy_cost_events_keep_ledger_allocation(self):
+        for rows in ([(18, 100, 2.0)], [(6, 300, None), (18, 100, None)],
+                     [(6, 300, 90.0), (18, 100, 20.0)]):
+            with self.subTest(rows=rows):
+                devices, events, start, end = self._own_case(rows)
+                *_, cost = USAGE._quota_window_tokens(devices, "claude", "c", start + 12 * 3600, end, events)
+                self.assertEqual(cost, 2.75)
+
+    def test_complete_events_keep_empty_subhour_window_empty(self):
+        devices, events, start, _end = self._own_case([(12, 400, 11.0)])
+        tokens, _, _, cost = USAGE._quota_window_tokens(devices, "claude", "c", start + 12 * 3600 + 1800, start + 13 * 3600, events)
+        self.assertEqual((tokens, cost), (0, 0.0))
+
+    def test_codex_event_cost_uses_main_bucket_and_cached_price(self):
+        day = "2026-03-02"
+        start, end = USAGE._quota_local_day_range(day)
+        ts = USAGE.datetime.fromtimestamp(start + 18 * 3600).astimezone().isoformat()
+        rows = [[ts, day, 0, 0, 0, 0, 100, 0, 0, 0, 2.0, "openai/gpt-5.5"],
+                [ts, day, 0, 0, 0, 0, 300, 0, 0, 0, 9.0, USAGE._CODEX_RESERVE_MODEL]]
+        cache = {"codex": {"fixture": {"canonical": True, "event_count": 2}}}
+        with mock.patch.object(USAGE, "_iter_codex_cached_events", return_value=rows):
+            events = USAGE._quota_codex_events([(start, end)], cache)
+        self.assertEqual([event[2] for event in events], [100])
+        self.assertEqual(events[0][3], 2.0)
+
+
 class SyncSnapshotAnchorTests(unittest.TestCase):
     def _snapshot(self, anchors):
         written = {}

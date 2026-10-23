@@ -18267,7 +18267,7 @@ def _quota_day_hour_bounds(day_key, start, end):
 
 
 def _quota_claude_events(cache=None):
-    """去重后的 Claude 事件 → [(epoch, 本地日, tokens)]。去重逻辑与 scan_claude 一致。"""
+    """去重后的 Claude 事件 → [(epoch, 本地日, tokens, cost)]。去重同 scan_claude。"""
     file_cache = (cache if cache is not None else _load_scan_cache()).get("claude") or {}
     all_events = []
     for path, entry in file_cache.items():
@@ -18281,7 +18281,7 @@ def _quota_claude_events(cache=None):
             continue
         dt = dt.astimezone()
         events.append((int(dt.timestamp()), dt.date().isoformat(),
-                       _claude_event_total(event)))
+                       _claude_event_total(event), _quota_cost_value(event.get("cost"))))
     return events
 
 
@@ -18316,8 +18316,12 @@ def _quota_codex_events(spans, cache=None):
                 dt = parse_ts(row[0])
                 if dt is None:
                     continue
+                # The main Codex day ledger excludes Reserve; keep its events out too.
+                if len(row) > 11 and _codex_is_reserve_model(row[11]):
+                    continue
                 events.append((int(dt.timestamp()), str(row[1]),
-                               int(row[6] or 0) + int(row[8] or 0)))
+                               int(row[6] or 0) + int(row[8] or 0),
+                               _quota_cost_value(row[10]) if len(row) > 10 else None))
         except (OSError, ValueError):
             continue
     return events
@@ -18333,27 +18337,52 @@ def _quota_peer_boundary(tools, tool, day_key, bounds, day_total):
     return day_total * (hi_hour - lo_hour) // 24, True
 
 
+def _quota_cost_value(value):
+    """Only finite, nonnegative costs can enter a public JSON payload."""
+    if isinstance(value, bool):
+        return None
+    try:
+        amount = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return amount if math.isfinite(amount) and amount >= 0 else None
+
+
 def _quota_day_cost(tools, tool, day_key):
     entry = (tools.get(tool) or {}).get(day_key)
     if not isinstance(entry, dict):
         return 0.0
-    try:
-        return float(entry.get("cost", 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
+    return _quota_cost_value(entry.get("cost")) or 0.0
 
 
 def _quota_window_tokens(devices, tool, key, start, end, self_events):
-    """→ (合计, {设备: token}, 是否含折算值, 美元成本)。self_events 为 None 时本机也走 hours。
+    """Return (tokens, per-device tokens, token approximation, estimated USD cost).
 
-    成本只有日粒度:整日取账本当天的 cost,首尾半天按切出来的 token 占当天的比例摊。
-    一天里模型构成大体稳定,摊出来的误差远小于周期本身的量级。
+    Full days use the retained ledger. A partial local day uses cached request
+    costs only when its complete token/cost coverage agrees with that ledger.
+    Missing, legacy, or differently priced events fall back to day cost weighted
+    by selected tokens; peers and Grok use that same explicitly estimated path.
     """
     interior, boundary = _quota_window_days(start, end)
-    self_by_day = {}
-    for ts, day, amount in self_events or ():
+    self_by_day, self_day_totals = {}, {}
+    self_cost_by_day, self_day_costs = {}, {}
+    missing_cost = set()
+    boundary_days = set(boundary)
+    for event in self_events or ():
+        day = event[1]
+        if day not in boundary_days:
+            continue
+        ts, amount = event[0], event[2]
+        self_day_totals[day] = self_day_totals.get(day, 0) + amount
+        event_cost = _quota_cost_value(event[3]) if len(event) > 3 else None
+        if event_cost is None:
+            missing_cost.add(day)
+        else:
+            self_day_costs[day] = self_day_costs.get(day, 0.0) + event_cost
         if start <= ts < end and day not in interior:
             self_by_day[day] = self_by_day.get(day, 0) + amount
+            if event_cost is not None:
+                self_cost_by_day[day] = self_cost_by_day.get(day, 0.0) + event_cost
 
     per_device = {}
     approx = False
@@ -18361,23 +18390,33 @@ def _quota_window_tokens(devices, tool, key, start, end, self_events):
     for name, tools, _snapshot, daily in devices:
         own = name == _QUOTA_SELF_DEVICE and self_events is not None
         total = sum(int((daily.get(day) or {}).get(key, 0)) for day in interior)
-        cost += sum(_quota_day_cost(tools, tool, day) for day in interior)
+        cost += sum(_quota_day_cost(tools, tool, day) for day in interior
+                    if int((daily.get(day) or {}).get(key, 0)) > 0)
         for day in boundary:
             bounds = _quota_day_hour_bounds(day, start, end)
             if bounds is None:
                 continue
             day_total = int((daily.get(day) or {}).get(key, 0))
-            # 事件有就用事件(最准);事件空但账本当天有量 = 日志被清理过,退回折算。
-            if own and (self_by_day.get(day) or not day_total):
+            complete_tokens = own and self_day_totals.get(day, 0) == day_total
+            # Complete events can prove an empty subhour window. An incomplete
+            # cache still follows the retained token/hour fallback behavior.
+            if own and (self_by_day.get(day) or not day_total or complete_tokens):
                 amount = self_by_day.get(day, 0)
             else:
                 amount, guessed = _quota_peer_boundary(tools, tool, day, bounds, day_total)
                 approx = approx or (guessed and amount > 0)
             total += amount
             if day_total > 0:
-                cost += _quota_day_cost(tools, tool, day) * min(amount / day_total, 1.0)
+                day_cost = _quota_day_cost(tools, tool, day)
+                complete_cost = (complete_tokens and day not in missing_cost
+                                 and math.isclose(self_day_costs.get(day, 0), day_cost,
+                                                  rel_tol=1e-9, abs_tol=0.0001))
+                if complete_cost and 0 < amount < day_total:
+                    cost += self_cost_by_day.get(day, 0.0)
+                else:
+                    cost += day_cost * max(0.0, min(amount / day_total, 1.0))
         per_device[name] = total
-    return sum(per_device.values()), per_device, approx, round(cost, 4)
+    return sum(per_device.values()), per_device, approx, round(_quota_cost_value(cost) or 0.0, 4)
 
 
 def _quota_tool_reading(source, tool):
